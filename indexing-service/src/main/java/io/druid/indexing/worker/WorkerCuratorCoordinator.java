@@ -1,42 +1,45 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Joiner;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.Inject;
 import com.metamx.common.ISE;
 import com.metamx.common.lifecycle.LifecycleStart;
 import com.metamx.common.lifecycle.LifecycleStop;
 import com.metamx.common.logger.Logger;
+import io.druid.curator.CuratorUtils;
 import io.druid.curator.announcement.Announcer;
 import io.druid.indexing.overlord.config.RemoteTaskRunnerConfig;
-import io.druid.server.initialization.ZkPathsConfig;
+import io.druid.server.initialization.IndexerZkConfig;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
 import org.joda.time.DateTime;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * The CuratorCoordinator provides methods to use Curator. Persistent ZK paths are created on {@link #start()}.
@@ -51,19 +54,19 @@ public class WorkerCuratorCoordinator
   private final ObjectMapper jsonMapper;
   private final RemoteTaskRunnerConfig config;
   private final CuratorFramework curatorFramework;
-  private final Worker worker;
   private final Announcer announcer;
 
   private final String baseAnnouncementsPath;
   private final String baseTaskPath;
   private final String baseStatusPath;
 
+  private volatile Worker worker;
   private volatile boolean started;
 
   @Inject
   public WorkerCuratorCoordinator(
       ObjectMapper jsonMapper,
-      ZkPathsConfig zkPaths,
+      IndexerZkConfig indexerZkConfig,
       RemoteTaskRunnerConfig config,
       CuratorFramework curatorFramework,
       Worker worker
@@ -76,9 +79,9 @@ public class WorkerCuratorCoordinator
 
     this.announcer = new Announcer(curatorFramework, MoreExecutors.sameThreadExecutor());
 
-    this.baseAnnouncementsPath = getPath(Arrays.asList(zkPaths.getIndexerAnnouncementPath(), worker.getHost()));
-    this.baseTaskPath = getPath(Arrays.asList(zkPaths.getIndexerTaskPath(), worker.getHost()));
-    this.baseStatusPath = getPath(Arrays.asList(zkPaths.getIndexerStatusPath(), worker.getHost()));
+    this.baseAnnouncementsPath = getPath(Arrays.asList(indexerZkConfig.getAnnouncementsPath(), worker.getHost()));
+    this.baseTaskPath = getPath(Arrays.asList(indexerZkConfig.getTasksPath(), worker.getHost()));
+    this.baseStatusPath = getPath(Arrays.asList(indexerZkConfig.getStatusPath(), worker.getHost()));
   }
 
   @LifecycleStart
@@ -90,18 +93,24 @@ public class WorkerCuratorCoordinator
         return;
       }
 
-      makePathIfNotExisting(
+      CuratorUtils.createIfNotExists(
+          curatorFramework,
           getTaskPathForWorker(),
           CreateMode.PERSISTENT,
-          ImmutableMap.of("created", new DateTime().toString())
+          jsonMapper.writeValueAsBytes(ImmutableMap.of("created", new DateTime().toString())),
+          config.getMaxZnodeBytes()
       );
-      makePathIfNotExisting(
+
+      CuratorUtils.createIfNotExists(
+          curatorFramework,
           getStatusPathForWorker(),
           CreateMode.PERSISTENT,
-          ImmutableMap.of("created", new DateTime().toString())
+          jsonMapper.writeValueAsBytes(ImmutableMap.of("created", new DateTime().toString())),
+          config.getMaxZnodeBytes()
       );
+
       announcer.start();
-      announcer.announce(getAnnouncementsPathForWorker(), jsonMapper.writeValueAsBytes(worker));
+      announcer.announce(getAnnouncementsPathForWorker(), jsonMapper.writeValueAsBytes(worker), false);
 
       started = true;
     }
@@ -115,31 +124,9 @@ public class WorkerCuratorCoordinator
       if (!started) {
         return;
       }
-
-      announcer.unannounce(getAnnouncementsPathForWorker());
       announcer.stop();
 
       started = false;
-    }
-  }
-
-  public void makePathIfNotExisting(String path, CreateMode mode, Object data) throws Exception
-  {
-    if (curatorFramework.checkExists().forPath(path) == null) {
-      try {
-        byte[] rawBytes = jsonMapper.writeValueAsBytes(data);
-        if (rawBytes.length > config.getMaxZnodeBytes()) {
-          throw new ISE("Length of raw bytes for task too large[%,d > %,d]", rawBytes.length, config.getMaxZnodeBytes());
-        }
-
-        curatorFramework.create()
-                        .creatingParentsIfNeeded()
-                        .withMode(mode)
-                        .forPath(path, rawBytes);
-      }
-      catch (Exception e) {
-        log.warn(e, "Could not create path[%s], perhaps it already exists?", path);
-      }
     }
   }
 
@@ -173,70 +160,63 @@ public class WorkerCuratorCoordinator
     return getPath(Arrays.asList(baseStatusPath, statusId));
   }
 
-  public void unannounceTask(String taskId)
+  public Worker getWorker()
+  {
+    return worker;
+  }
+
+  public void removeTaskRunZnode(String taskId) throws Exception
   {
     try {
       curatorFramework.delete().guaranteed().forPath(getTaskPathForId(taskId));
     }
-    catch (Exception e) {
+    catch (KeeperException e) {
       log.warn(e, "Could not delete task path for task[%s]", taskId);
     }
   }
 
-  public void announceTastAnnouncement(TaskAnnouncement announcement)
+  public void updateTaskStatusAnnouncement(TaskAnnouncement announcement) throws Exception
   {
     synchronized (lock) {
       if (!started) {
         return;
       }
 
-      try {
-        byte[] rawBytes = jsonMapper.writeValueAsBytes(announcement);
-        if (rawBytes.length > config.getMaxZnodeBytes()) {
-          throw new ISE(
-              "Length of raw bytes for task too large[%,d > %,d]", rawBytes.length, config.getMaxZnodeBytes()
-          );
-        }
-
-        curatorFramework.create()
-                        .withMode(CreateMode.EPHEMERAL)
-                        .forPath(
-                            getStatusPathForId(announcement.getTaskStatus().getId()), rawBytes
-                        );
-      }
-      catch (Exception e) {
-        throw Throwables.propagate(e);
-      }
+      CuratorUtils.createOrSet(
+          curatorFramework,
+          getStatusPathForId(announcement.getTaskStatus().getId()),
+          CreateMode.PERSISTENT,
+          jsonMapper.writeValueAsBytes(announcement),
+          config.getMaxZnodeBytes()
+      );
     }
   }
 
-  public void updateAnnouncement(TaskAnnouncement announcement)
+  public List<TaskAnnouncement> getAnnouncements() throws Exception
+  {
+    final List<TaskAnnouncement> announcements = Lists.newArrayList();
+
+    for (String id : curatorFramework.getChildren().forPath(getStatusPathForWorker())) {
+      announcements.add(
+          jsonMapper.readValue(
+              curatorFramework.getData().forPath(getStatusPathForId(id)),
+              TaskAnnouncement.class
+          )
+      );
+    }
+
+    return announcements;
+  }
+
+  public void updateWorkerAnnouncement(Worker newWorker) throws Exception
   {
     synchronized (lock) {
       if (!started) {
-        return;
+        throw new ISE("Cannot update worker! Not Started!");
       }
 
-      try {
-        if (curatorFramework.checkExists().forPath(getStatusPathForId(announcement.getTaskStatus().getId())) == null) {
-          announceTastAnnouncement(announcement);
-          return;
-        }
-        byte[] rawBytes = jsonMapper.writeValueAsBytes(announcement);
-        if (rawBytes.length > config.getMaxZnodeBytes()) {
-          throw new ISE(
-              "Length of raw bytes for task too large[%,d > %,d]", rawBytes.length, config.getMaxZnodeBytes()
-          );
-        }
-
-        curatorFramework.setData()
-                        .forPath(
-                            getStatusPathForId(announcement.getTaskStatus().getId()), rawBytes
-                        );
-      }
-      catch (Exception e) {
-        throw Throwables.propagate(e);
-      }
+      this.worker = newWorker;
+      announcer.update(getAnnouncementsPathForWorker(), jsonMapper.writeValueAsBytes(newWorker));
     }
   }
 }

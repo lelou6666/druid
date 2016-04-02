@@ -1,43 +1,38 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.timeseries;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.base.Function;
-import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.inject.Inject;
-import com.metamx.common.guava.MergeSequence;
-import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.nary.BinaryFn;
 import com.metamx.emitter.service.ServiceMetricEvent;
-import io.druid.collections.OrderedMergeSequence;
 import io.druid.granularity.QueryGranularity;
 import io.druid.query.CacheStrategy;
-import io.druid.query.DataSourceUtil;
-import io.druid.query.IntervalChunkingQueryRunner;
+import io.druid.query.DruidMetrics;
+import io.druid.query.IntervalChunkingQueryRunnerDecorator;
 import io.druid.query.Query;
 import io.druid.query.QueryCacheHelper;
-import io.druid.query.QueryConfig;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
 import io.druid.query.Result;
@@ -48,8 +43,6 @@ import io.druid.query.aggregation.MetricManipulationFn;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.filter.DimFilter;
 import org.joda.time.DateTime;
-import org.joda.time.Interval;
-import org.joda.time.Minutes;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
@@ -62,7 +55,6 @@ import java.util.Map;
 public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<TimeseriesResultValue>, TimeseriesQuery>
 {
   private static final byte TIMESERIES_QUERY = 0x0;
-  private static final Joiner COMMA_JOIN = Joiner.on(",");
   private static final TypeReference<Object> OBJECT_TYPE_REFERENCE =
       new TypeReference<Object>()
       {
@@ -71,26 +63,27 @@ public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<Timeser
       new TypeReference<Result<TimeseriesResultValue>>()
       {
       };
-  private final QueryConfig config;
+
+  private final IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator;
 
   @Inject
-  public TimeseriesQueryQueryToolChest(QueryConfig config)
+  public TimeseriesQueryQueryToolChest(IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator)
   {
-    this.config = config;
+    this.intervalChunkingQueryRunnerDecorator = intervalChunkingQueryRunnerDecorator;
   }
 
   @Override
-  public QueryRunner<Result<TimeseriesResultValue>> mergeResults(QueryRunner<Result<TimeseriesResultValue>> queryRunner)
+  public QueryRunner<Result<TimeseriesResultValue>> mergeResults(
+      QueryRunner<Result<TimeseriesResultValue>> queryRunner
+  )
   {
     return new ResultMergeQueryRunner<Result<TimeseriesResultValue>>(queryRunner)
     {
       @Override
       protected Ordering<Result<TimeseriesResultValue>> makeOrdering(Query<Result<TimeseriesResultValue>> query)
       {
-        return Ordering.from(
-            new ResultGranularTimestampComparator<TimeseriesResultValue>(
-                ((TimeseriesQuery) query).getGranularity()
-            )
+        return ResultGranularTimestampComparator.create(
+            ((TimeseriesQuery) query).getGranularity(), query.isDescending()
         );
       }
 
@@ -109,26 +102,17 @@ public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<Timeser
   }
 
   @Override
-  public Sequence<Result<TimeseriesResultValue>> mergeSequences(Sequence<Sequence<Result<TimeseriesResultValue>>> seqOfSequences)
-  {
-    return new OrderedMergeSequence<Result<TimeseriesResultValue>>(getOrdering(), seqOfSequences);
-  }
-
-  @Override
   public ServiceMetricEvent.Builder makeMetricBuilder(TimeseriesQuery query)
   {
-    int numMinutes = 0;
-    for (Interval interval : query.getIntervals()) {
-      numMinutes += Minutes.minutesIn(interval).getMinutes();
-    }
-
-    return new ServiceMetricEvent.Builder()
-        .setUser2(DataSourceUtil.getMetricName(query.getDataSource()))
-        .setUser4("timeseries")
-        .setUser5(COMMA_JOIN.join(query.getIntervals()))
-        .setUser6(String.valueOf(query.hasFilters()))
-        .setUser7(String.format("%,d aggs", query.getAggregatorSpecs().size()))
-        .setUser9(Minutes.minutes(numMinutes).toString());
+    return DruidMetrics.makePartialQueryTimeMetric(query)
+                       .setDimension(
+                           "numMetrics",
+                           String.valueOf(query.getAggregatorSpecs().size())
+                       )
+                       .setDimension(
+                           "numComplexMetrics",
+                           String.valueOf(DruidMetrics.findNumComplexAggs(query.getAggregatorSpecs()))
+                       );
   }
 
   @Override
@@ -151,10 +135,14 @@ public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<Timeser
         final byte[] filterBytes = dimFilter == null ? new byte[]{} : dimFilter.getCacheKey();
         final byte[] aggregatorBytes = QueryCacheHelper.computeAggregatorBytes(query.getAggregatorSpecs());
         final byte[] granularityBytes = query.getGranularity().cacheKey();
+        final byte descending = query.isDescending() ? (byte) 1 : 0;
+        final byte skipEmptyBuckets = query.isSkipEmptyBuckets() ? (byte) 1 : 0;
 
         return ByteBuffer
-            .allocate(1 + granularityBytes.length + filterBytes.length + aggregatorBytes.length)
+            .allocate(3 + granularityBytes.length + filterBytes.length + aggregatorBytes.length)
             .put(TIMESERIES_QUERY)
+            .put(descending)
+            .put(skipEmptyBuckets)
             .put(granularityBytes)
             .put(filterBytes)
             .put(aggregatorBytes)
@@ -173,7 +161,7 @@ public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<Timeser
         return new Function<Result<TimeseriesResultValue>, Object>()
         {
           @Override
-          public Object apply(@Nullable final Result<TimeseriesResultValue> input)
+          public Object apply(final Result<TimeseriesResultValue> input)
           {
             TimeseriesResultValue results = input.getValue();
             final List<Object> retVal = Lists.newArrayListWithCapacity(1 + aggs.size());
@@ -218,28 +206,13 @@ public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<Timeser
           }
         };
       }
-
-      @Override
-      public Sequence<Result<TimeseriesResultValue>> mergeSequences(Sequence<Sequence<Result<TimeseriesResultValue>>> seqOfSequences)
-      {
-        return new MergeSequence<Result<TimeseriesResultValue>>(getOrdering(), seqOfSequences);
-      }
     };
   }
 
   @Override
   public QueryRunner<Result<TimeseriesResultValue>> preMergeQueryDecoration(QueryRunner<Result<TimeseriesResultValue>> runner)
   {
-    return new IntervalChunkingQueryRunner<Result<TimeseriesResultValue>>(
-        runner,
-        config.getChunkPeriod()
-
-    );
-  }
-
-  public Ordering<Result<TimeseriesResultValue>> getOrdering()
-  {
-    return Ordering.natural();
+    return intervalChunkingQueryRunnerDecorator.decorate(runner, this);
   }
 
   @Override
@@ -267,8 +240,8 @@ public class TimeseriesQueryQueryToolChest extends QueryToolChest<Result<Timeser
       @Override
       public Result<TimeseriesResultValue> apply(Result<TimeseriesResultValue> result)
       {
-        final Map<String, Object> values = Maps.newHashMap();
         final TimeseriesResultValue holder = result.getValue();
+        final Map<String, Object> values = Maps.newHashMap(holder.getBaseObject());
         if (calculatePostAggs) {
           // put non finalized aggregators for calculating dependent post Aggregators
           for (AggregatorFactory agg : query.getAggregatorSpecs()) {

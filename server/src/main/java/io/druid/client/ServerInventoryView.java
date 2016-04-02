@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.client;
@@ -22,9 +22,11 @@ package io.druid.client;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Charsets;
 import com.google.common.base.Function;
 import com.google.common.base.Throwables;
 import com.google.common.collect.MapMaker;
+import com.metamx.common.StringUtils;
 import com.metamx.common.lifecycle.LifecycleStart;
 import com.metamx.common.lifecycle.LifecycleStop;
 import com.metamx.emitter.EmittingLogger;
@@ -36,6 +38,8 @@ import io.druid.timeline.DataSegment;
 import org.apache.curator.framework.CuratorFramework;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
@@ -94,34 +98,15 @@ public abstract class ServerInventoryView<InventoryType> implements ServerView, 
           }
 
           @Override
-          public byte[] serializeContainer(DruidServer container)
-          {
-            try {
-              return jsonMapper.writeValueAsBytes(container);
-            }
-            catch (JsonProcessingException e) {
-              throw Throwables.propagate(e);
-            }
-          }
-
-          @Override
           public InventoryType deserializeInventory(byte[] bytes)
           {
             try {
               return jsonMapper.readValue(bytes, typeReference);
             }
             catch (IOException e) {
-              throw Throwables.propagate(e);
-            }
-          }
-
-          @Override
-          public byte[] serializeInventory(InventoryType inventory)
-          {
-            try {
-              return jsonMapper.writeValueAsBytes(inventory);
-            }
-            catch (JsonProcessingException e) {
+              CharBuffer.wrap(StringUtils.fromUtf8(bytes).toCharArray());
+              CharBuffer charBuffer = Charsets.UTF_8.decode(ByteBuffer.wrap(bytes));
+              log.error(e, "Could not parse json: %s", charBuffer.toString());
               throw Throwables.propagate(e);
             }
           }
@@ -167,6 +152,22 @@ public abstract class ServerInventoryView<InventoryType> implements ServerView, 
           public DruidServer removeInventory(final DruidServer container, String inventoryKey)
           {
             return removeInnerInventory(container, inventoryKey);
+          }
+
+          @Override
+          public void inventoryInitialized()
+          {
+            log.info("Inventory Initialized");
+            runSegmentCallbacks(
+                new Function<SegmentCallback, CallbackAction>()
+                {
+                  @Override
+                  public CallbackAction apply(SegmentCallback input)
+                  {
+                    return input.segmentViewInitialized();
+                  }
+                }
+            );
           }
         }
     );
@@ -270,7 +271,7 @@ public abstract class ServerInventoryView<InventoryType> implements ServerView, 
       final DataSegment inventory
   )
   {
-    log.info("Server[%s] added segment[%s]", container.getName(), inventory.getIdentifier());
+    log.debug("Server[%s] added segment[%s]", container.getName(), inventory.getIdentifier());
 
     if (container.getSegment(inventory.getIdentifier()) != null) {
       log.warn(
@@ -298,7 +299,7 @@ public abstract class ServerInventoryView<InventoryType> implements ServerView, 
 
   protected void removeSingleInventory(final DruidServer container, String inventoryKey)
   {
-    log.info("Server[%s] removed segment[%s]", container.getName(), inventoryKey);
+    log.debug("Server[%s] removed segment[%s]", container.getName(), inventoryKey);
     final DataSegment segment = container.getSegment(inventoryKey);
 
     if (segment == null) {

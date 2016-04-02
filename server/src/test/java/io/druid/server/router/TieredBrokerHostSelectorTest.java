@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.router;
@@ -22,7 +22,6 @@ package io.druid.server.router;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableMap;
-import com.metamx.common.Pair;
 import com.metamx.http.client.HttpClient;
 import io.druid.client.DruidServer;
 import io.druid.curator.discovery.ServerDiscoveryFactory;
@@ -30,17 +29,15 @@ import io.druid.curator.discovery.ServerDiscoverySelector;
 import io.druid.guice.annotations.Global;
 import io.druid.guice.annotations.Json;
 import io.druid.query.Druids;
-import io.druid.query.TableDataSource;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
 import io.druid.query.spec.MultipleIntervalSegmentSpec;
-import io.druid.query.timeboundary.TimeBoundaryQuery;
 import io.druid.server.coordinator.rules.IntervalLoadRule;
 import io.druid.server.coordinator.rules.Rule;
-import junit.framework.Assert;
 import org.easymock.EasyMock;
 import org.joda.time.Interval;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -84,7 +81,8 @@ public class TieredBrokerHostSelectorTest
             return "hotBroker";
           }
         },
-        factory
+        factory,
+        Arrays.asList(new TimeBoundaryTieredBrokerSelectorStrategy(), new PriorityTieredBrokerSelectorStrategy(0, 1))
     );
     EasyMock.expect(factory.createSelector(EasyMock.<String>anyObject())).andReturn(selector).atLeastOnce();
     EasyMock.replay(factory);
@@ -196,6 +194,52 @@ public class TieredBrokerHostSelectorTest
     Assert.assertEquals("coldBroker", brokerName);
   }
 
+  @Test
+  public void testPrioritySelect() throws Exception
+  {
+    String brokerName = (String) brokerSelector.select(
+        Druids.newTimeseriesQueryBuilder()
+              .dataSource("test")
+              .aggregators(Arrays.<AggregatorFactory>asList(new CountAggregatorFactory("count")))
+              .intervals(
+                  new MultipleIntervalSegmentSpec(
+                      Arrays.<Interval>asList(
+                          new Interval("2011-08-31/2011-09-01"),
+                          new Interval("2012-08-31/2012-09-01"),
+                          new Interval("2013-08-31/2013-09-01")
+                      )
+                  )
+              )
+              .context(ImmutableMap.<String, Object>of("priority", -1))
+              .build()
+    ).lhs;
+
+    Assert.assertEquals("coldBroker", brokerName);
+  }
+
+  @Test
+  public void testPrioritySelect2() throws Exception
+  {
+    String brokerName = (String) brokerSelector.select(
+        Druids.newTimeseriesQueryBuilder()
+              .dataSource("test")
+              .aggregators(Arrays.<AggregatorFactory>asList(new CountAggregatorFactory("count")))
+              .intervals(
+                  new MultipleIntervalSegmentSpec(
+                      Arrays.<Interval>asList(
+                          new Interval("2011-08-31/2011-09-01"),
+                          new Interval("2012-08-31/2012-09-01"),
+                          new Interval("2013-08-31/2013-09-01")
+                      )
+                  )
+              )
+              .context(ImmutableMap.<String, Object>of("priority", 5))
+              .build()
+    ).lhs;
+
+    Assert.assertEquals("hotBroker", brokerName);
+  }
+
   private static class TestRuleManager extends CoordinatorRuleManager
   {
     public TestRuleManager(
@@ -218,13 +262,11 @@ public class TieredBrokerHostSelectorTest
     public List<Rule> getRulesWithDefault(String dataSource)
     {
       return Arrays.<Rule>asList(
-          new IntervalLoadRule(new Interval("2013/2014"), ImmutableMap.<String, Integer>of("hot", 1), null, null),
-          new IntervalLoadRule(new Interval("2012/2013"), ImmutableMap.<String, Integer>of("medium", 1), null, null),
+          new IntervalLoadRule(new Interval("2013/2014"), ImmutableMap.<String, Integer>of("hot", 1)),
+          new IntervalLoadRule(new Interval("2012/2013"), ImmutableMap.<String, Integer>of("medium", 1)),
           new IntervalLoadRule(
               new Interval("2011/2012"),
-              ImmutableMap.<String, Integer>of(DruidServer.DEFAULT_TIER, 1),
-              null,
-              null
+              ImmutableMap.<String, Integer>of(DruidServer.DEFAULT_TIER, 1)
           )
       );
     }

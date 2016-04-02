@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.coordination.coordination;
@@ -33,7 +33,6 @@ import io.druid.server.coordination.DruidServerMetadata;
 import io.druid.server.initialization.BatchDataSegmentAnnouncerConfig;
 import io.druid.server.initialization.ZkPathsConfig;
 import io.druid.timeline.DataSegment;
-import junit.framework.Assert;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.ExponentialBackoffRetry;
@@ -41,12 +40,14 @@ import org.apache.curator.test.TestingCluster;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  */
@@ -64,6 +65,8 @@ public class BatchDataSegmentAnnouncerTest
   private BatchDataSegmentAnnouncer segmentAnnouncer;
   private Set<DataSegment> testSegments;
 
+  private final AtomicInteger maxBytesPerNode = new AtomicInteger(512 * 1024);
+
   @Before
   public void setUp() throws Exception
   {
@@ -76,6 +79,7 @@ public class BatchDataSegmentAnnouncerTest
                                 .compressionProvider(new PotentiallyGzippedCompressionProvider(false))
                                 .build();
     cf.start();
+    cf.blockUntilConnected();
     cf.create().creatingParentsIfNeeded().forPath(testBasePath);
 
     jsonMapper = new DefaultObjectMapper();
@@ -103,11 +107,17 @@ public class BatchDataSegmentAnnouncerTest
           {
             return 50;
           }
+
+          @Override
+          public long getMaxBytesPerNode()
+          {
+            return maxBytesPerNode.get();
+          }
         },
         new ZkPathsConfig()
         {
           @Override
-          public String getZkBasePath()
+          public String getBase()
           {
             return testBasePath;
           }
@@ -168,13 +178,41 @@ public class BatchDataSegmentAnnouncerTest
   }
 
   @Test
+  public void testSingleAnnounceManyTimes() throws Exception
+  {
+    int prevMax = maxBytesPerNode.get();
+    maxBytesPerNode.set(2048);
+    // each segment is about 317 bytes long and that makes 2048 / 317 = 6 segments included per node
+    // so 100 segments makes (100 / 6) + 1 = 17 nodes
+    try {
+      for (DataSegment segment : testSegments) {
+        segmentAnnouncer.announceSegment(segment);
+      }
+    }
+    finally {
+      maxBytesPerNode.set(prevMax);
+    }
+
+    List<String> zNodes = cf.getChildren().forPath(testSegmentsPath);
+    Assert.assertEquals(17, zNodes.size());
+
+    Set<DataSegment> segments = Sets.newHashSet(testSegments);
+    for (String zNode : zNodes) {
+      for (DataSegment segment : segmentReader.read(joiner.join(testSegmentsPath, zNode))) {
+        Assert.assertTrue("Invalid segment " + segment, segments.remove(segment));
+      }
+    }
+    Assert.assertTrue("Failed to find segments " + segments, segments.isEmpty());
+  }
+
+  @Test
   public void testBatchAnnounce() throws Exception
   {
     segmentAnnouncer.announceSegments(testSegments);
 
     List<String> zNodes = cf.getChildren().forPath(testSegmentsPath);
 
-    Assert.assertTrue(zNodes.size() == 2);
+    Assert.assertEquals(2, zNodes.size());
 
     Set<DataSegment> allSegments = Sets.newHashSet();
     for (String zNode : zNodes) {
@@ -191,7 +229,7 @@ public class BatchDataSegmentAnnouncerTest
   public void testMultipleBatchAnnounce() throws Exception
   {
     for (int i = 0; i < 10; i++) {
-       testBatchAnnounce();
+      testBatchAnnounce();
     }
   }
 
@@ -226,8 +264,8 @@ public class BatchDataSegmentAnnouncerTest
         if (cf.checkExists().forPath(path) != null) {
           return jsonMapper.readValue(
               cf.getData().forPath(path), new TypeReference<Set<DataSegment>>()
-          {
-          }
+              {
+              }
           );
         }
       }

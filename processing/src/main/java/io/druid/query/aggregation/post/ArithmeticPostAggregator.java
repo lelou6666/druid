@@ -1,26 +1,27 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.aggregation.post;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.metamx.common.IAE;
@@ -36,7 +37,7 @@ import java.util.Set;
  */
 public class ArithmeticPostAggregator implements PostAggregator
 {
-  private static final Comparator COMPARATOR = new Comparator()
+  private static final Comparator DEFAULT_COMPARATOR = new Comparator()
   {
     @Override
     public int compare(Object o, Object o1)
@@ -49,25 +50,40 @@ public class ArithmeticPostAggregator implements PostAggregator
   private final String fnName;
   private final List<PostAggregator> fields;
   private final Ops op;
+  private final Comparator comparator;
+  private final String ordering;
+
+  public ArithmeticPostAggregator(
+      String name,
+      String fnName,
+      List<PostAggregator> fields
+  )
+  {
+    this(name, fnName, fields, null);
+  }
 
   @JsonCreator
   public ArithmeticPostAggregator(
       @JsonProperty("name") String name,
       @JsonProperty("fn") String fnName,
-      @JsonProperty("fields") List<PostAggregator> fields
+      @JsonProperty("fields") List<PostAggregator> fields,
+      @JsonProperty("ordering") String ordering
   )
   {
+    Preconditions.checkArgument(fnName != null, "fn cannot not be null");
+    Preconditions.checkArgument(fields != null && fields.size() > 1, "Illegal number of fields[%s], must be > 1");
+
     this.name = name;
     this.fnName = fnName;
     this.fields = fields;
-    if (fields.size() <= 1) {
-      throw new IAE("Illegal number of fields[%s], must be > 1", fields.size());
-    }
 
     this.op = Ops.lookup(fnName);
     if (op == null) {
       throw new IAE("Unknown operation[%s], known operations[%s]", fnName, Ops.getFns());
     }
+
+    this.ordering = ordering;
+    this.comparator = ordering == null ? DEFAULT_COMPARATOR : Ordering.valueOf(ordering);
   }
 
   @Override
@@ -83,7 +99,7 @@ public class ArithmeticPostAggregator implements PostAggregator
   @Override
   public Comparator getComparator()
   {
-    return COMPARATOR;
+    return comparator;
   }
 
   @Override
@@ -113,6 +129,12 @@ public class ArithmeticPostAggregator implements PostAggregator
     return fnName;
   }
 
+  @JsonProperty("ordering")
+  public String getOrdering()
+  {
+    return ordering;
+  }
+
   @JsonProperty
   public List<PostAggregator> getFields()
   {
@@ -134,30 +156,37 @@ public class ArithmeticPostAggregator implements PostAggregator
   {
     PLUS("+")
         {
-          double compute(double lhs, double rhs)
+          public double compute(double lhs, double rhs)
           {
             return lhs + rhs;
           }
         },
     MINUS("-")
         {
-          double compute(double lhs, double rhs)
+          public double compute(double lhs, double rhs)
           {
             return lhs - rhs;
           }
         },
     MULT("*")
         {
-          double compute(double lhs, double rhs)
+          public double compute(double lhs, double rhs)
           {
             return lhs * rhs;
           }
         },
     DIV("/")
         {
-          double compute(double lhs, double rhs)
+          public double compute(double lhs, double rhs)
           {
             return (rhs == 0.0) ? 0 : (lhs / rhs);
+          }
+        },
+    QUOTIENT("quotient")
+        {
+          public double compute(double lhs, double rhs)
+          {
+            return lhs / rhs;
           }
         };
 
@@ -181,7 +210,7 @@ public class ArithmeticPostAggregator implements PostAggregator
       return fn;
     }
 
-    abstract double compute(double lhs, double rhs);
+    public abstract double compute(double lhs, double rhs);
 
     static Ops lookup(String fn)
     {
@@ -194,18 +223,56 @@ public class ArithmeticPostAggregator implements PostAggregator
     }
   }
 
+  public static enum Ordering implements Comparator<Double> {
+    // ensures the following order: numeric > NaN > Infinite
+    numericFirst {
+      public int compare(Double lhs, Double rhs) {
+        if(isFinite(lhs) && !isFinite(rhs)) {
+          return 1;
+        }
+        if(!isFinite(lhs) && isFinite(rhs)) {
+          return -1;
+        }
+        return Double.compare(lhs, rhs);
+      }
+
+      // Double.isFinite only exist in JDK8
+      private boolean isFinite(double value) {
+        return !Double.isInfinite(value) && !Double.isNaN(value);
+      }
+    }
+  }
+
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
 
     ArithmeticPostAggregator that = (ArithmeticPostAggregator) o;
 
-    if (fields != null ? !fields.equals(that.fields) : that.fields != null) return false;
-    if (fnName != null ? !fnName.equals(that.fnName) : that.fnName != null) return false;
-    if (name != null ? !name.equals(that.name) : that.name != null) return false;
-    if (op != that.op) return false;
+    if (!comparator.equals(that.comparator)) {
+      return false;
+    }
+    if (!fields.equals(that.fields)) {
+      return false;
+    }
+    if (!fnName.equals(that.fnName)) {
+      return false;
+    }
+    if (name != null ? !name.equals(that.name) : that.name != null) {
+      return false;
+    }
+    if (op != that.op) {
+      return false;
+    }
+    if (ordering != null ? !ordering.equals(that.ordering) : that.ordering != null) {
+      return false;
+    }
 
     return true;
   }
@@ -214,9 +281,11 @@ public class ArithmeticPostAggregator implements PostAggregator
   public int hashCode()
   {
     int result = name != null ? name.hashCode() : 0;
-    result = 31 * result + (fnName != null ? fnName.hashCode() : 0);
-    result = 31 * result + (fields != null ? fields.hashCode() : 0);
-    result = 31 * result + (op != null ? op.hashCode() : 0);
+    result = 31 * result + fnName.hashCode();
+    result = 31 * result + fields.hashCode();
+    result = 31 * result + op.hashCode();
+    result = 31 * result + comparator.hashCode();
+    result = 31 * result + (ordering != null ? ordering.hashCode() : 0);
     return result;
   }
 }

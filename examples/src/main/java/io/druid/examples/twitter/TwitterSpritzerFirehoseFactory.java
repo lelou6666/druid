@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.examples.twitter;
@@ -22,6 +22,8 @@ package io.druid.examples.twitter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
+import com.google.common.base.Function;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.metamx.common.logger.Logger;
 import io.druid.data.input.Firehose;
@@ -30,6 +32,7 @@ import io.druid.data.input.InputRow;
 import io.druid.data.input.MapBasedInputRow;
 import io.druid.data.input.impl.InputRowParser;
 import twitter4j.ConnectionLifeCycleListener;
+import twitter4j.GeoLocation;
 import twitter4j.HashtagEntity;
 import twitter4j.StallWarning;
 import twitter4j.Status;
@@ -39,15 +42,18 @@ import twitter4j.TwitterStream;
 import twitter4j.TwitterStreamFactory;
 import twitter4j.User;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static java.lang.Thread.sleep;
 
@@ -58,33 +64,30 @@ import static java.lang.Thread.sleep;
  * with timestamps along with ??.
  * The generated tuples have the form (timestamp, ????)
  * where the timestamp is from the twitter event.
- * <p>
  * <p/>
- * </p>
  * Example spec file:
- * <pre>
- * </pre>
  * <p/>
  * Example query using POST to /druid/v2/?w  (where w is an arbitrary parameter and the date and time
  * is UTC):
- * <pre>
- * </pre>
- *
- *
+ * <p/>
  * Notes on twitter.com HTTP (REST) API: v1.0 will be disabled around 2013-03 so v1.1 should be used;
  * twitter4j 3.0 (not yet released) will support the v1.1 api.
  * Specifically, we should be using https://stream.twitter.com/1.1/statuses/sample.json
  * See: http://jira.twitter4j.org/browse/TFJ-186
+ * <p/>
+ * Notes on JSON parsing: as of twitter4j 2.2.x, the json parser has some bugs (ex: Status.toString()
+ * can have number format exceptions), so it might be necessary to extract raw json and process it
+ * separately.  If so, set twitter4.jsonStoreEnabled=true and look at DataObjectFactory#getRawJSON();
+ * com.fasterxml.jackson.databind.ObjectMapper should be used to parse.
  *
- *  Notes on JSON parsing: as of twitter4j 2.2.x, the json parser has some bugs (ex: Status.toString()
- *  can have number format exceptions), so it might be necessary to extract raw json and process it
- *  separately.  If so, set twitter4.jsonStoreEnabled=true and look at DataObjectFactory#getRawJSON();
- *  com.fasterxml.jackson.databind.ObjectMapper should be used to parse.
  * @author pbaclace
  */
 @JsonTypeName("twitzer")
-public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowParser> {
+public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowParser>
+{
   private static final Logger log = new Logger(TwitterSpritzerFirehoseFactory.class);
+  private static final Pattern sourcePattern = Pattern.compile("<a[^>]*>(.*?)</a>", Pattern.CASE_INSENSITIVE);
+
   /**
    * max events to receive, -1 is infinite, 0 means nothing is delivered; use this to prevent
    * infinite space consumption or to prevent getting throttled at an inconvenient time
@@ -114,7 +117,8 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
   @Override
   public Firehose connect(InputRowParser parser) throws IOException
   {
-    final ConnectionLifeCycleListener connectionLifeCycleListener = new ConnectionLifeCycleListener() {
+    final ConnectionLifeCycleListener connectionLifeCycleListener = new ConnectionLifeCycleListener()
+    {
       @Override
       public void onConnect()
       {
@@ -142,19 +146,15 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
     final int QUEUE_SIZE = 2000;
     /** This queue is used to move twitter events from the twitter4j thread to the druid ingest thread.   */
     final BlockingQueue<Status> queue = new ArrayBlockingQueue<Status>(QUEUE_SIZE);
-    final LinkedList<String> dimensions = new LinkedList<String>();
     final long startMsec = System.currentTimeMillis();
-
-    dimensions.add("htags");
-    dimensions.add("lang");
-    dimensions.add("utc_offset");
 
     //
     //   set up Twitter Spritzer
     //
     twitterStream = new TwitterStreamFactory().getInstance();
     twitterStream.addConnectionLifeCycleListener(connectionLifeCycleListener);
-    statusListener = new StatusListener() {  // This is what really gets called to deliver stuff from twitter4j
+    statusListener = new StatusListener()
+    {  // This is what really gets called to deliver stuff from twitter4j
       @Override
       public void onStatus(Status status)
       {
@@ -167,7 +167,8 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
           if (!success) {
             log.warn("queue too slow!");
           }
-        } catch (InterruptedException e) {
+        }
+        catch (InterruptedException e) {
           throw new RuntimeException("InterruptedException", e);
         }
       }
@@ -199,7 +200,8 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
       }
 
       @Override
-      public void onStallWarning(StallWarning warning) {
+      public void onStallWarning(StallWarning warning)
+      {
         System.out.println("Got stall warning:" + warning);
       }
     };
@@ -208,31 +210,33 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
     twitterStream.sample(); // creates a generic StatusStream
     log.info("returned from sample()");
 
-    return new Firehose() {
+    return new Firehose()
+    {
 
-      private final Runnable doNothingRunnable = new Runnable() {
+      private final Runnable doNothingRunnable = new Runnable()
+      {
         public void run()
         {
         }
       };
 
       private long rowCount = 0L;
-      private boolean waitIfmax = (maxEventCount < 0L);
-      private final Map<String, Object> theMap = new HashMap<String, Object>(2);
+      private boolean waitIfmax = (getMaxEventCount() < 0L);
+      private final Map<String, Object> theMap = new TreeMap<>();
       // DIY json parsing // private final ObjectMapper omapper = new ObjectMapper();
 
       private boolean maxTimeReached()
       {
-        if (maxRunMinutes <= 0) {
+        if (getMaxRunMinutes() <= 0) {
           return false;
         } else {
-          return (System.currentTimeMillis() - startMsec) / 60000L >= maxRunMinutes;
+          return (System.currentTimeMillis() - startMsec) / 60000L >= getMaxRunMinutes();
         }
       }
 
       private boolean maxCountReached()
       {
-        return maxEventCount >= 0 && rowCount >= maxEventCount;
+        return getMaxEventCount() >= 0 && rowCount >= getMaxEventCount();
       }
 
       @Override
@@ -260,7 +264,8 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
             try {
               log.info("reached limit, sleeping a long time...");
               sleep(2000000000L);
-            } catch (InterruptedException e) {
+            }
+            catch (InterruptedException e) {
               throw new RuntimeException("InterruptedException", e);
             }
           } else {
@@ -274,30 +279,81 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
         Status status;
         try {
           status = queue.take();
-        } catch (InterruptedException e) {
+        }
+        catch (InterruptedException e) {
           throw new RuntimeException("InterruptedException", e);
         }
 
+        theMap.clear();
+
         HashtagEntity[] hts = status.getHashtagEntities();
-        if (hts != null && hts.length > 0) {
-          List<String> hashTags = Lists.newArrayListWithExpectedSize(hts.length);
-          for (HashtagEntity ht : hts) {
-            hashTags.add(ht.getText());
-          }
+        String text = status.getText();
+        theMap.put("text", (null == text) ? "" : text);
+        theMap.put(
+            "htags", (hts.length > 0) ? Lists.transform(
+                Arrays.asList(hts), new Function<HashtagEntity, String>()
+                {
+                  @Nullable
+                  @Override
+                  public String apply(HashtagEntity input)
+                  {
+                    return input.getText();
+                  }
+                }
+            ) : ImmutableList.<String>of()
+        );
 
-          theMap.put("htags", Arrays.asList(hashTags.get(0)));
+        long[] lcontrobutors = status.getContributors();
+        List<String> contributors = new ArrayList<>();
+        for (long contrib : lcontrobutors) {
+          contributors.add(String.format("%d", contrib));
+        }
+        theMap.put("contributors", contributors);
+
+        GeoLocation geoLocation = status.getGeoLocation();
+        if (null != geoLocation) {
+          double lat = status.getGeoLocation().getLatitude();
+          double lon = status.getGeoLocation().getLongitude();
+          theMap.put("lat", lat);
+          theMap.put("lon", lon);
+        } else {
+          theMap.put("lat", null);
+          theMap.put("lon", null);
         }
 
-        long retweetCount = status.getRetweetCount();
-        theMap.put("retweet_count", retweetCount);
+        if (status.getSource() != null) {
+          Matcher m = sourcePattern.matcher(status.getSource());
+          theMap.put("source", m.find() ? m.group(1) : status.getSource());
+        }
+
+        theMap.put("retweet", status.isRetweet());
+
+        if (status.isRetweet()) {
+          Status original = status.getRetweetedStatus();
+          theMap.put("retweet_count", original.getRetweetCount());
+
+          User originator = original.getUser();
+          theMap.put("originator_screen_name", originator != null ? originator.getScreenName() : "");
+          theMap.put("originator_follower_count", originator != null ? originator.getFollowersCount() : "");
+          theMap.put("originator_friends_count", originator != null ? originator.getFriendsCount() : "");
+          theMap.put("originator_verified", originator != null ? originator.isVerified() : "");
+        }
+
         User user = status.getUser();
-        if (user != null) {
-          theMap.put("follower_count", user.getFollowersCount());
-          theMap.put("friends_count", user.getFriendsCount());
-          theMap.put("lang", user.getLang());
-          theMap.put("utc_offset", user.getUtcOffset());  // resolution in seconds, -1 if not available?
-          theMap.put("statuses_count", user.getStatusesCount());
-        }
+        final boolean hasUser = (null != user);
+        theMap.put("follower_count", hasUser ? user.getFollowersCount() : 0);
+        theMap.put("friends_count", hasUser ? user.getFriendsCount() : 0);
+        theMap.put("lang", hasUser ? user.getLang() : "");
+        theMap.put("utc_offset", hasUser ? user.getUtcOffset() : -1);  // resolution in seconds, -1 if not available?
+        theMap.put("statuses_count", hasUser ? user.getStatusesCount() : 0);
+        theMap.put("user_id", hasUser ? String.format("%d", user.getId()) : "");
+        theMap.put("screen_name", hasUser ? user.getScreenName() : "");
+        theMap.put("location", hasUser ? user.getLocation() : "");
+        theMap.put("verified", hasUser ? user.isVerified() : "");
+
+        theMap.put("ts",status.getCreatedAt().getTime());
+
+        List<String> dimensions = Lists.newArrayList(theMap.keySet());
 
         return new MapBasedInputRow(status.getCreatedAt().getTime(), dimensions, theMap);
       }
@@ -318,9 +374,15 @@ public class TwitterSpritzerFirehoseFactory implements FirehoseFactory<InputRowP
     };
   }
 
-  @Override
-  public InputRowParser getParser()
+  @JsonProperty
+  public int getMaxEventCount()
   {
-    return null;
+    return maxEventCount;
+  }
+
+  @JsonProperty
+  public int getMaxRunMinutes()
+  {
+    return maxRunMinutes;
   }
 }

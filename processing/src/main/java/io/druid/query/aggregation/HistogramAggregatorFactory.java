@@ -1,31 +1,31 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.aggregation;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.primitives.Floats;
 import com.google.common.primitives.Longs;
+import com.metamx.common.StringUtils;
 import io.druid.segment.ColumnSelectorFactory;
 import org.apache.commons.codec.binary.Base64;
 
@@ -34,7 +34,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
-public class HistogramAggregatorFactory implements AggregatorFactory
+public class HistogramAggregatorFactory extends AggregatorFactory
 {
   private static final byte CACHE_TYPE_ID = 0x7;
 
@@ -56,7 +56,7 @@ public class HistogramAggregatorFactory implements AggregatorFactory
 
     this.name = name;
     this.fieldName = fieldName;
-    this.breaksList = (breaksList == null) ? Lists.<Float>newArrayList() :breaksList;
+    this.breaksList = (breaksList == null) ? Lists.<Float>newArrayList() : breaksList;
     this.breaks = new float[this.breaksList.size()];
     for (int i = 0; i < this.breaksList.size(); ++i) {
       this.breaks[i] = this.breaksList.get(i);
@@ -101,6 +101,12 @@ public class HistogramAggregatorFactory implements AggregatorFactory
   }
 
   @Override
+  public List<AggregatorFactory> getRequiredColumns()
+  {
+    return Arrays.<AggregatorFactory>asList(new HistogramAggregatorFactory(fieldName, fieldName, breaksList));
+  }
+
+  @Override
   public Object deserialize(Object object)
   {
     if (object instanceof byte[]) {
@@ -108,7 +114,7 @@ public class HistogramAggregatorFactory implements AggregatorFactory
     } else if (object instanceof ByteBuffer) {
       return Histogram.fromBytes((ByteBuffer) object);
     } else if (object instanceof String) {
-      byte[] bytes = Base64.decodeBase64(((String) object).getBytes(Charsets.UTF_8));
+      byte[] bytes = Base64.decodeBase64(StringUtils.toUtf8((String) object));
       return Histogram.fromBytes(bytes);
     }
     return object;
@@ -148,14 +154,21 @@ public class HistogramAggregatorFactory implements AggregatorFactory
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = fieldName.getBytes();
-    return ByteBuffer.allocate(1 + fieldNameBytes.length).put(CACHE_TYPE_ID).put(fieldNameBytes).array();
+    byte[] fieldNameBytes = StringUtils.toUtf8(fieldName);
+    ByteBuffer buf = ByteBuffer
+        .allocate(1 + fieldNameBytes.length + Floats.BYTES * breaks.length)
+        .put(CACHE_TYPE_ID)
+        .put(fieldNameBytes)
+        .put((byte)0xFF);
+    buf.asFloatBuffer().put(breaks);
+
+    return buf.array();
   }
 
   @Override
   public String getTypeName()
   {
-    throw new UnsupportedOperationException("HistogramAggregatorFactory does not support getTypeName()");
+    return "histogram";
   }
 
   @Override
@@ -183,15 +196,27 @@ public class HistogramAggregatorFactory implements AggregatorFactory
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
 
     HistogramAggregatorFactory that = (HistogramAggregatorFactory) o;
 
-    if (!Arrays.equals(breaks, that.breaks)) return false;
-    if (breaksList != null ? !breaksList.equals(that.breaksList) : that.breaksList != null) return false;
-    if (fieldName != null ? !fieldName.equals(that.fieldName) : that.fieldName != null) return false;
-    if (name != null ? !name.equals(that.name) : that.name != null) return false;
+    if (!Arrays.equals(breaks, that.breaks)) {
+      return false;
+    }
+    if (breaksList != null ? !breaksList.equals(that.breaksList) : that.breaksList != null) {
+      return false;
+    }
+    if (fieldName != null ? !fieldName.equals(that.fieldName) : that.fieldName != null) {
+      return false;
+    }
+    if (name != null ? !name.equals(that.name) : that.name != null) {
+      return false;
+    }
 
     return true;
   }

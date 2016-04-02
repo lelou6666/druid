@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.curator;
@@ -24,13 +24,22 @@ import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.metamx.common.lifecycle.Lifecycle;
 import com.metamx.common.logger.Logger;
-import io.druid.guice.ConfigProvider;
+
+import io.druid.guice.JsonConfigProvider;
 import io.druid.guice.LazySingleton;
+
+import org.apache.curator.framework.api.ACLProvider;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.framework.imps.DefaultACLProvider;
 import org.apache.curator.retry.BoundedExponentialBackoffRetry;
 
 import java.io.IOException;
+
+import java.util.List;
+
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.data.ACL;
 
 /**
  */
@@ -41,19 +50,24 @@ public class CuratorModule implements Module
   @Override
   public void configure(Binder binder)
   {
-    ConfigProvider.bind(binder, CuratorConfig.class);
+    JsonConfigProvider.bind(
+        binder, "druid.zk.service",
+        CuratorConfig.class
+    );
   }
 
-  @Provides @LazySingleton
+  @Provides
+  @LazySingleton
   public CuratorFramework makeCurator(CuratorConfig config, Lifecycle lifecycle) throws IOException
   {
     final CuratorFramework framework =
         CuratorFrameworkFactory.builder()
                                .connectString(config.getZkHosts())
                                .sessionTimeoutMs(config.getZkSessionTimeoutMs())
-            .retryPolicy(new BoundedExponentialBackoffRetry(1000, 45000, 30))
-            .compressionProvider(new PotentiallyGzippedCompressionProvider(config.enableCompression()))
-            .build();
+                               .retryPolicy(new BoundedExponentialBackoffRetry(1000, 45000, 30))
+                               .compressionProvider(new PotentiallyGzippedCompressionProvider(config.getEnableCompression()))
+                               .aclProvider(config.getEnableAcl() ? new SecuredACLProvider() : new DefaultACLProvider())
+                               .build();
 
     lifecycle.addHandler(
         new Lifecycle.Handler()
@@ -75,5 +89,20 @@ public class CuratorModule implements Module
     );
 
     return framework;
+  }
+
+  class SecuredACLProvider implements ACLProvider
+  {
+    @Override
+    public List<ACL> getDefaultAcl()
+    {
+      return ZooDefs.Ids.CREATOR_ALL_ACL;
+    }
+
+    @Override
+    public List<ACL> getAclForPath(String path)
+    {
+      return ZooDefs.Ids.CREATOR_ALL_ACL;
+    }
   }
 }

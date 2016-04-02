@@ -1,24 +1,25 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.router;
 
+import com.google.common.base.Optional;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
 import com.google.inject.Inject;
@@ -30,12 +31,12 @@ import io.druid.client.selector.HostSelector;
 import io.druid.curator.discovery.ServerDiscoveryFactory;
 import io.druid.curator.discovery.ServerDiscoverySelector;
 import io.druid.query.Query;
-import io.druid.query.timeboundary.TimeBoundaryQuery;
 import io.druid.server.coordinator.rules.LoadRule;
 import io.druid.server.coordinator.rules.Rule;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +51,7 @@ public class TieredBrokerHostSelector<T> implements HostSelector<T>
   private final TieredBrokerConfig tierConfig;
   private final ServerDiscoveryFactory serverDiscoveryFactory;
   private final ConcurrentHashMap<String, ServerDiscoverySelector> selectorMap = new ConcurrentHashMap<>();
+  private final List<TieredBrokerSelectorStrategy> strategies;
 
   private final Object lock = new Object();
 
@@ -59,12 +61,14 @@ public class TieredBrokerHostSelector<T> implements HostSelector<T>
   public TieredBrokerHostSelector(
       CoordinatorRuleManager ruleManager,
       TieredBrokerConfig tierConfig,
-      ServerDiscoveryFactory serverDiscoveryFactory
+      ServerDiscoveryFactory serverDiscoveryFactory,
+      List<TieredBrokerSelectorStrategy> strategies
   )
   {
     this.ruleManager = ruleManager;
     this.tierConfig = tierConfig;
     this.serverDiscoveryFactory = serverDiscoveryFactory;
+    this.strategies = strategies;
   }
 
   @LifecycleStart
@@ -128,12 +132,12 @@ public class TieredBrokerHostSelector<T> implements HostSelector<T>
 
     String brokerServiceName = null;
 
-    // Somewhat janky way of always selecting highest priority broker for this type of query
-    if (query instanceof TimeBoundaryQuery) {
-      brokerServiceName = Iterables.getFirst(
-          tierConfig.getTierToBrokerMap().values(),
-          tierConfig.getDefaultBrokerServiceName()
-      );
+    for (TieredBrokerSelectorStrategy strategy : strategies) {
+      final Optional<String> optionalName = strategy.getBrokerServiceName(tierConfig, query);
+      if (optionalName.isPresent()) {
+        brokerServiceName = optionalName.get();
+        break;
+      }
     }
 
     if (brokerServiceName == null) {
@@ -199,5 +203,10 @@ public class TieredBrokerHostSelector<T> implements HostSelector<T>
     final String brokerServiceName = tierConfig.getDefaultBrokerServiceName();
     final ServerDiscoverySelector retVal = selectorMap.get(brokerServiceName);
     return new Pair<>(brokerServiceName, retVal);
+  }
+
+  public Map<String, ServerDiscoverySelector> getAllBrokers()
+  {
+    return Collections.unmodifiableMap(selectorMap);
   }
 }

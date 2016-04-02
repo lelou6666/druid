@@ -1,29 +1,28 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.data;
 
-import com.google.common.base.Charsets;
 import com.google.common.collect.Ordering;
-import com.google.common.io.Closeables;
 import com.google.common.primitives.Ints;
 import com.metamx.common.IAE;
+import com.metamx.common.guava.CloseQuietly;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -36,19 +35,21 @@ import java.util.Iterator;
 /**
  * A generic, flat storage mechanism.  Use static methods fromArray() or fromIterable() to construct.  If input
  * is sorted, supports binary search index lookups.  If input is not sorted, only supports array-like index lookups.
- * <p/>
+ *
  * V1 Storage Format:
- * <p/>
+ *
  * byte 1: version (0x1)
- * byte 2 == 0x1 => allowReverseLookup
- * bytes 3-6 => numBytesUsed
- * bytes 7-10 => numElements
+ * byte 2 == 0x1 =&gt; allowReverseLookup
+ * bytes 3-6 =&gt; numBytesUsed
+ * bytes 7-10 =&gt; numElements
  * bytes 10-((numElements * 4) + 10): integers representing *end* offsets of byte serialized values
  * bytes ((numElements * 4) + 10)-(numBytesUsed + 2): 4-byte integer representing length of value, followed by bytes for value
  */
 public class GenericIndexed<T> implements Indexed<T>
 {
   private static final byte version = 0x1;
+
+  private int indexOffset;
 
   public static <T> GenericIndexed<T> fromArray(T[] objects, ObjectStrategy<T> strategy)
   {
@@ -65,53 +66,85 @@ public class GenericIndexed<T> implements Indexed<T>
     }
 
     boolean allowReverseLookup = true;
-    int count = 1;
-    T prevVal = objects.next();
-    while (objects.hasNext()) {
-      T next = objects.next();
-      if (!(strategy.compare(prevVal, next) < 0)) {
-        allowReverseLookup = false;
-      }
-      if (prevVal instanceof Closeable) {
-        Closeables.closeQuietly((Closeable) prevVal);
-      }
+    int count = 0;
 
-      prevVal = next;
-      ++count;
-    }
-    if (prevVal instanceof Closeable) {
-      Closeables.closeQuietly((Closeable) prevVal);
-    }
-
-    ByteArrayOutputStream headerBytes = new ByteArrayOutputStream(4 + (count * 4));
+    ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
     ByteArrayOutputStream valueBytes = new ByteArrayOutputStream();
-    int offset = 0;
-
     try {
-      headerBytes.write(Ints.toByteArray(count));
+      int offset = 0;
+      T prevVal = null;
+      do {
+        count++;
+        T next = objects.next();
+        if (allowReverseLookup && prevVal != null && !(strategy.compare(prevVal, next) < 0)) {
+          allowReverseLookup = false;
+        }
 
-      for (T object : objectsIterable) {
-        final byte[] bytes = strategy.toBytes(object);
+        final byte[] bytes = strategy.toBytes(next);
         offset += 4 + bytes.length;
         headerBytes.write(Ints.toByteArray(offset));
         valueBytes.write(Ints.toByteArray(bytes.length));
         valueBytes.write(bytes);
 
-        if (object instanceof Closeable) {
-          Closeables.closeQuietly((Closeable) object);
+        if (prevVal instanceof Closeable) {
+          CloseQuietly.close((Closeable) prevVal);
         }
+        prevVal = next;
+      } while (objects.hasNext());
+
+      if (prevVal instanceof Closeable) {
+        CloseQuietly.close((Closeable) prevVal);
       }
     }
     catch (IOException e) {
       throw new RuntimeException(e);
     }
 
-    ByteBuffer theBuffer = ByteBuffer.allocate(headerBytes.size() + valueBytes.size());
+    ByteBuffer theBuffer = ByteBuffer.allocate(Ints.BYTES + headerBytes.size() + valueBytes.size());
+    theBuffer.put(Ints.toByteArray(count));
     theBuffer.put(headerBytes.toByteArray());
     theBuffer.put(valueBytes.toByteArray());
     theBuffer.flip();
 
     return new GenericIndexed<T>(theBuffer.asReadOnlyBuffer(), strategy, allowReverseLookup);
+  }
+
+  @Override
+  public Class<? extends T> getClazz()
+  {
+    return bufferIndexed.getClazz();
+  }
+
+  @Override
+  public int size()
+  {
+    return bufferIndexed.size();
+  }
+
+  @Override
+  public T get(int index)
+  {
+    return bufferIndexed.get(index);
+  }
+
+  /**
+   * Returns the index of "value" in this GenericIndexed object, or (-(insertion point) - 1) if the value is not
+   * present, in the manner of Arrays.binarySearch. This strengthens the contract of Indexed, which only guarantees
+   * that values-not-found will return some negative number.
+   *
+   * @param value value to search for
+   * @return index of value, or negative number equal to (-(insertion point) - 1).
+   */
+  @Override
+  public int indexOf(T value)
+  {
+    return bufferIndexed.indexOf(value);
+  }
+
+  @Override
+  public Iterator<T> iterator()
+  {
+    return bufferIndexed.iterator();
   }
 
   private final ByteBuffer theBuffer;
@@ -120,6 +153,7 @@ public class GenericIndexed<T> implements Indexed<T>
   private final int size;
 
   private final int valuesOffset;
+  private final BufferIndexed bufferIndexed;
 
   GenericIndexed(
       ByteBuffer buffer,
@@ -132,79 +166,110 @@ public class GenericIndexed<T> implements Indexed<T>
     this.allowReverseLookup = allowReverseLookup;
 
     size = theBuffer.getInt();
+    indexOffset = theBuffer.position();
     valuesOffset = theBuffer.position() + (size << 2);
+    bufferIndexed = new BufferIndexed();
   }
 
-  @Override
-  public Class<? extends T> getClazz()
+  class BufferIndexed implements Indexed<T>
   {
-    return strategy.getClazz();
-  }
+    int lastReadSize;
 
-  @Override
-  public int size()
-  {
-    return size;
-  }
-
-  @Override
-  public T get(int index)
-  {
-    if (index < 0) {
-      throw new IAE("Index[%s] < 0", index);
-    }
-    if (index >= size) {
-      throw new IAE(String.format("Index[%s] >= size[%s]", index, size));
+    @Override
+    public Class<? extends T> getClazz()
+    {
+      return strategy.getClazz();
     }
 
-    ByteBuffer myBuffer = theBuffer.asReadOnlyBuffer();
-    int startOffset = 4;
-    int endOffset;
-
-    if (index == 0) {
-      endOffset = myBuffer.getInt();
-    } else {
-      myBuffer.position(myBuffer.position() + ((index - 1) * 4));
-      startOffset = myBuffer.getInt() + 4;
-      endOffset = myBuffer.getInt();
+    @Override
+    public int size()
+    {
+      return size;
     }
 
-    if (startOffset == endOffset) {
-      return null;
+    @Override
+    public T get(final int index)
+    {
+      return _get(theBuffer.asReadOnlyBuffer(), index);
     }
 
-    myBuffer.position(valuesOffset + startOffset);
-    return strategy.fromByteBuffer(myBuffer, endOffset - startOffset);
-  }
-
-  @Override
-  public int indexOf(T value)
-  {
-    if (!allowReverseLookup) {
-      throw new UnsupportedOperationException("Reverse lookup not allowed.");
-    }
-
-    value = (value != null && value.equals("")) ? null : value;
-
-    int minIndex = 0;
-    int maxIndex = size - 1;
-    while (minIndex <= maxIndex) {
-      int currIndex = (minIndex + maxIndex) >>> 1;
-
-      T currValue = get(currIndex);
-      int comparison = strategy.compare(currValue, value);
-      if (comparison == 0) {
-        return currIndex;
+    protected T _get(final ByteBuffer copyBuffer, final int index)
+    {
+      if (index < 0) {
+        throw new IAE("Index[%s] < 0", index);
+      }
+      if (index >= size) {
+        throw new IAE(String.format("Index[%s] >= size[%s]", index, size));
       }
 
-      if (comparison < 0) {
-        minIndex = currIndex + 1;
+      final int startOffset;
+      final int endOffset;
+
+      if (index == 0) {
+        startOffset = 4;
+        endOffset = copyBuffer.getInt(indexOffset);
       } else {
-        maxIndex = currIndex - 1;
+        copyBuffer.position(indexOffset + ((index - 1) * 4));
+        startOffset = copyBuffer.getInt() + 4;
+        endOffset = copyBuffer.getInt();
       }
+
+      if (startOffset == endOffset) {
+        return null;
+      }
+
+      copyBuffer.position(valuesOffset + startOffset);
+      final int size = endOffset - startOffset;
+      lastReadSize = size;
+      // fromByteBuffer must not modify the buffer limit
+      final T value = strategy.fromByteBuffer(copyBuffer, size);
+
+      return value;
     }
 
-    return -(minIndex + 1);
+    /**
+     * This method makes no guarantees with respect to thread safety
+     * @return the size in bytes of the last value read
+     */
+    public int getLastValueSize() {
+      return lastReadSize;
+    }
+
+    @Override
+    public int indexOf(T value)
+    {
+      if (!allowReverseLookup) {
+        throw new UnsupportedOperationException("Reverse lookup not allowed.");
+      }
+
+      value = (value != null && value.equals("")) ? null : value;
+
+      int minIndex = 0;
+      int maxIndex = size - 1;
+      while (minIndex <= maxIndex) {
+        int currIndex = (minIndex + maxIndex) >>> 1;
+
+        T currValue = get(currIndex);
+        int comparison = strategy.compare(currValue, value);
+        if (comparison == 0) {
+          return currIndex;
+        }
+
+        if (comparison < 0) {
+          minIndex = currIndex + 1;
+        } else {
+          maxIndex = currIndex - 1;
+        }
+      }
+
+      return -(minIndex + 1);
+    }
+
+    @Override
+    public Iterator<T> iterator()
+    {
+      return IndexedIterable.create(this).iterator();
+    }
   }
 
   public long getSerializedSize()
@@ -218,6 +283,23 @@ public class GenericIndexed<T> implements Indexed<T>
     channel.write(ByteBuffer.wrap(Ints.toByteArray(theBuffer.remaining() + 4)));
     channel.write(ByteBuffer.wrap(Ints.toByteArray(size)));
     channel.write(theBuffer.asReadOnlyBuffer());
+  }
+
+  /**
+   * Create a non-thread-safe Indexed, which may perform better than the underlying Indexed.
+   *
+   * @return a non-thread-safe Indexed
+   */
+  public GenericIndexed<T>.BufferIndexed singleThreaded()
+  {
+    final ByteBuffer copyBuffer = theBuffer.asReadOnlyBuffer();
+    return new BufferIndexed() {
+      @Override
+      public T get(int index)
+      {
+        return _get(copyBuffer, index);
+      }
+    };
   }
 
   public static <T> GenericIndexed<T> read(ByteBuffer buffer, ObjectStrategy<T> strategy)
@@ -241,7 +323,7 @@ public class GenericIndexed<T> implements Indexed<T>
     throw new IAE("Unknown version[%s]", versionFromBuffer);
   }
 
-  public static ObjectStrategy<String> stringStrategy = new ObjectStrategy<String>()
+  public static final ObjectStrategy<String> STRING_STRATEGY = new CacheableObjectStrategy<String>()
   {
     @Override
     public Class<? extends String> getClazz()
@@ -250,11 +332,9 @@ public class GenericIndexed<T> implements Indexed<T>
     }
 
     @Override
-    public String fromByteBuffer(ByteBuffer buffer, int numBytes)
+    public String fromByteBuffer(final ByteBuffer buffer, final int numBytes)
     {
-      byte[] bytes = new byte[numBytes];
-      buffer.get(bytes);
-      return new String(bytes, Charsets.UTF_8);
+      return com.metamx.common.StringUtils.fromUtf8(buffer, numBytes);
     }
 
     @Override
@@ -263,7 +343,7 @@ public class GenericIndexed<T> implements Indexed<T>
       if (val == null) {
         return new byte[]{};
       }
-      return val.getBytes(Charsets.UTF_8);
+      return com.metamx.common.StringUtils.toUtf8(val);
     }
 
     @Override
@@ -272,10 +352,4 @@ public class GenericIndexed<T> implements Indexed<T>
       return Ordering.natural().nullsFirst().compare(o1, o2);
     }
   };
-
-  @Override
-  public Iterator<T> iterator()
-  {
-    return IndexedIterable.create(this).iterator();
-  }
 }

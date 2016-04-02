@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.search;
@@ -22,24 +22,22 @@ package io.druid.query.search;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
-import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Ordering;
-import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
 import com.metamx.common.IAE;
 import com.metamx.common.ISE;
-import com.metamx.common.guava.MergeSequence;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
 import com.metamx.common.guava.nary.BinaryFn;
 import com.metamx.emitter.service.ServiceMetricEvent;
-import io.druid.collections.OrderedMergeSequence;
+import io.druid.query.BaseQuery;
 import io.druid.query.CacheStrategy;
-import io.druid.query.DataSourceUtil;
-import io.druid.query.IntervalChunkingQueryRunner;
+import io.druid.query.DruidMetrics;
+import io.druid.query.IntervalChunkingQueryRunnerDecorator;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
@@ -47,52 +45,58 @@ import io.druid.query.Result;
 import io.druid.query.ResultGranularTimestampComparator;
 import io.druid.query.ResultMergeQueryRunner;
 import io.druid.query.aggregation.MetricManipulationFn;
+import io.druid.query.dimension.DimensionSpec;
 import io.druid.query.filter.DimFilter;
 import io.druid.query.search.search.SearchHit;
 import io.druid.query.search.search.SearchQuery;
 import io.druid.query.search.search.SearchQueryConfig;
 import org.joda.time.DateTime;
-import org.joda.time.Interval;
-import org.joda.time.Minutes;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  */
 public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResultValue>, SearchQuery>
 {
   private static final byte SEARCH_QUERY = 0x2;
-  private static final Joiner COMMA_JOIN = Joiner.on(",");
   private static final TypeReference<Result<SearchResultValue>> TYPE_REFERENCE = new TypeReference<Result<SearchResultValue>>()
   {
   };
   private static final TypeReference<Object> OBJECT_TYPE_REFERENCE = new TypeReference<Object>()
   {
   };
+
   private final SearchQueryConfig config;
+
+  private final IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator;
 
   @Inject
   public SearchQueryQueryToolChest(
-      SearchQueryConfig config
+      SearchQueryConfig config,
+      IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator
   )
   {
     this.config = config;
+    this.intervalChunkingQueryRunnerDecorator = intervalChunkingQueryRunnerDecorator;
   }
 
   @Override
-  public QueryRunner<Result<SearchResultValue>> mergeResults(QueryRunner<Result<SearchResultValue>> runner)
+  public QueryRunner<Result<SearchResultValue>> mergeResults(
+      QueryRunner<Result<SearchResultValue>> runner
+  )
   {
     return new ResultMergeQueryRunner<Result<SearchResultValue>>(runner)
     {
       @Override
       protected Ordering<Result<SearchResultValue>> makeOrdering(Query<Result<SearchResultValue>> query)
       {
-        return Ordering.from(
-            new ResultGranularTimestampComparator<SearchResultValue>(((SearchQuery) query).getGranularity())
+        return ResultGranularTimestampComparator.create(
+            ((SearchQuery) query).getGranularity(),
+            query.isDescending()
         );
       }
 
@@ -108,25 +112,9 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
   }
 
   @Override
-  public Sequence<Result<SearchResultValue>> mergeSequences(Sequence<Sequence<Result<SearchResultValue>>> seqOfSequences)
-  {
-    return new OrderedMergeSequence<Result<SearchResultValue>>(getOrdering(), seqOfSequences);
-  }
-
-  @Override
   public ServiceMetricEvent.Builder makeMetricBuilder(SearchQuery query)
   {
-    int numMinutes = 0;
-    for (Interval interval : query.getIntervals()) {
-      numMinutes += Minutes.minutesIn(interval).getMinutes();
-    }
-
-    return new ServiceMetricEvent.Builder()
-        .setUser2(DataSourceUtil.getMetricName(query.getDataSource()))
-        .setUser4("search")
-        .setUser5(COMMA_JOIN.join(query.getIntervals()))
-        .setUser6(String.valueOf(query.hasFilters()))
-        .setUser9(Minutes.minutes(numMinutes).toString());
+    return DruidMetrics.makePartialQueryTimeMetric(query);
   }
 
   @Override
@@ -156,30 +144,33 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
         final byte[] querySpecBytes = query.getQuery().getCacheKey();
         final byte[] granularityBytes = query.getGranularity().cacheKey();
 
-        final Set<String> dimensions = Sets.newTreeSet();
-        if (query.getDimensions() != null) {
-          dimensions.addAll(query.getDimensions());
-        }
+        final Collection<DimensionSpec> dimensions = query.getDimensions() == null
+                                                     ? ImmutableList.<DimensionSpec>of()
+                                                     : query.getDimensions();
 
         final byte[][] dimensionsBytes = new byte[dimensions.size()][];
         int dimensionsBytesSize = 0;
         int index = 0;
-        for (String dimension : dimensions) {
-          dimensionsBytes[index] = dimension.getBytes();
+        for (DimensionSpec dimension : dimensions) {
+          dimensionsBytes[index] = dimension.getCacheKey();
           dimensionsBytesSize += dimensionsBytes[index].length;
           ++index;
         }
 
+        final byte[] sortSpecBytes = query.getSort().getCacheKey();
+
         final ByteBuffer queryCacheKey = ByteBuffer
             .allocate(
                 1 + 4 + granularityBytes.length + filterBytes.length +
-                    querySpecBytes.length + dimensionsBytesSize
+                querySpecBytes.length + dimensionsBytesSize + sortSpecBytes.length
             )
             .put(SEARCH_QUERY)
             .put(Ints.toByteArray(query.getLimit()))
             .put(granularityBytes)
             .put(filterBytes)
-            .put(querySpecBytes);
+            .put(querySpecBytes)
+            .put(sortSpecBytes)
+            ;
 
         for (byte[] bytes : dimensionsBytes) {
           queryCacheKey.put(bytes);
@@ -218,8 +209,8 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
           {
             List<Object> result = (List<Object>) input;
 
-            return new Result<SearchResultValue>(
-                new DateTime(result.get(0)),
+            return new Result<>(
+                new DateTime(((Number) result.get(0)).longValue()),
                 new SearchResultValue(
                     Lists.transform(
                         (List) result.get(1),
@@ -246,12 +237,6 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
           }
         };
       }
-
-      @Override
-      public Sequence<Result<SearchResultValue>> mergeSequences(Sequence<Sequence<Result<SearchResultValue>>> seqOfSequences)
-      {
-        return new MergeSequence<Result<SearchResultValue>>(getOrdering(), seqOfSequences);
-      }
     };
   }
 
@@ -259,14 +244,9 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
   public QueryRunner<Result<SearchResultValue>> preMergeQueryDecoration(QueryRunner<Result<SearchResultValue>> runner)
   {
     return new SearchThresholdAdjustingQueryRunner(
-        new IntervalChunkingQueryRunner<Result<SearchResultValue>>(runner, config.getChunkPeriod()),
+        intervalChunkingQueryRunnerDecorator.decorate(runner, this),
         config
     );
-  }
-
-  public Ordering<Result<SearchResultValue>> getOrdering()
-  {
-    return Ordering.natural();
   }
 
   private static class SearchThresholdAdjustingQueryRunner implements QueryRunner<Result<SearchResultValue>>
@@ -284,7 +264,10 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
     }
 
     @Override
-    public Sequence<Result<SearchResultValue>> run(Query<Result<SearchResultValue>> input)
+    public Sequence<Result<SearchResultValue>> run(
+        Query<Result<SearchResultValue>> input,
+        Map<String, Object> responseContext
+    )
     {
       if (!(input instanceof SearchQuery)) {
         throw new ISE("Can only handle [%s], got [%s]", SearchQuery.class, input.getClass());
@@ -292,13 +275,13 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
 
       final SearchQuery query = (SearchQuery) input;
       if (query.getLimit() < config.getMaxSearchLimit()) {
-        return runner.run(query);
+        return runner.run(query, responseContext);
       }
 
-      final boolean isBySegment = query.getContextBySegment(false);
+      final boolean isBySegment = BaseQuery.getContextBySegment(query, false);
 
       return Sequences.map(
-          runner.run(query.withLimit(config.getMaxSearchLimit())),
+          runner.run(query.withLimit(config.getMaxSearchLimit()), responseContext),
           new Function<Result<SearchResultValue>, Result<SearchResultValue>>()
           {
             @Override
@@ -332,7 +315,7 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
                             }
                         ),
                         value.getSegmentId(),
-                        value.getIntervalString()
+                        value.getInterval()
                     )
                 );
               }

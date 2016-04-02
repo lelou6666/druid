@@ -8,8 +8,8 @@ import io.druid.granularity.QueryGranularity;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
 import io.druid.query.aggregation.DoubleSumAggregatorFactory;
-import io.druid.query.aggregation.MaxAggregatorFactory;
-import io.druid.query.aggregation.MinAggregatorFactory;
+import io.druid.query.aggregation.DoubleMaxAggregatorFactory;
+import io.druid.query.aggregation.DoubleMinAggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.aggregation.post.ArithmeticPostAggregator;
 import io.druid.query.aggregation.post.ConstantPostAggregator;
@@ -70,8 +70,8 @@ import java.util.Map;
     AggregatorFactory evalAgg(String name, int fn) {
         switch (fn) {
             case SUM: return new DoubleSumAggregatorFactory("sum("+name+")", name);
-            case MIN: return new MinAggregatorFactory("min("+name+")", name);
-            case MAX: return new MaxAggregatorFactory("max("+name+")", name);
+            case MIN: return new DoubleMinAggregatorFactory("min("+name+")", name);
+            case MAX: return new DoubleMaxAggregatorFactory("max("+name+")", name);
             case COUNT: return new CountAggregatorFactory(name);
         }
         throw new IllegalArgumentException("Unknown function [" + fn + "]"); 
@@ -212,12 +212,12 @@ unaryExpression returns [PostAggregator p]
         if($e.p instanceof ConstantPostAggregator) {
             ConstantPostAggregator c = (ConstantPostAggregator)$e.p;
             double v = c.getConstantValue().doubleValue() * -1;
-            $p = new ConstantPostAggregator(Double.toString(v), v, null);
+            $p = new ConstantPostAggregator(Double.toString(v), v);
         } else {
             $p = new ArithmeticPostAggregator(
                 "-"+$e.p.getName(),
                 "*",
-                Lists.newArrayList($e.p, new ConstantPostAggregator("-1", -1.0, null))
+                Lists.newArrayList($e.p, new ConstantPostAggregator("-1", -1.0))
             );
         }
     }
@@ -240,7 +240,7 @@ aggregate returns [AggregatorFactory agg]
     ;
 
 constant returns [ConstantPostAggregator c]
-    : value=NUMBER  { double v = Double.parseDouble($value.text); $c = new ConstantPostAggregator(Double.toString(v), v, null); }
+    : value=NUMBER  { double v = Double.parseDouble($value.text); $c = new ConstantPostAggregator(Double.toString(v), v); }
     ;
 
 /* time filters must be top level filters */

@@ -1,57 +1,69 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.common.actions;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.collect.ImmutableSet;
 import com.metamx.emitter.service.ServiceMetricEvent;
 import io.druid.indexing.common.task.Task;
+import io.druid.indexing.overlord.DataSourceMetadata;
+import io.druid.indexing.overlord.SegmentPublishResult;
+import io.druid.query.DruidMetrics;
 import io.druid.timeline.DataSegment;
 
 import java.io.IOException;
 import java.util.Set;
 
-public class SegmentInsertAction implements TaskAction<Set<DataSegment>>
+/**
+ * Insert segments into metadata storage. The segment versions must all be less than or equal to a lock held by
+ * your task for the segment intervals.
+ * <p/>
+ * Word of warning: Very large "segments" sets can cause oversized audit log entries, which is bad because it means
+ * that the task cannot actually complete. Callers should avoid this by avoiding inserting too many segments in the
+ * same action.
+ */
+public class SegmentInsertAction implements TaskAction<SegmentPublishResult>
 {
-  @JsonIgnore
   private final Set<DataSegment> segments;
+  private final DataSourceMetadata startMetadata;
+  private final DataSourceMetadata endMetadata;
 
-  @JsonIgnore
-  private final boolean allowOlderVersions;
-
-  public SegmentInsertAction(Set<DataSegment> segments)
+  public SegmentInsertAction(
+      Set<DataSegment> segments
+  )
   {
-    this(segments, false);
+    this(segments, null, null);
   }
 
   @JsonCreator
   public SegmentInsertAction(
       @JsonProperty("segments") Set<DataSegment> segments,
-      @JsonProperty("allowOlderVersions") boolean allowOlderVersions
+      @JsonProperty("startMetadata") DataSourceMetadata startMetadata,
+      @JsonProperty("endMetadata") DataSourceMetadata endMetadata
   )
   {
     this.segments = ImmutableSet.copyOf(segments);
-    this.allowOlderVersions = allowOlderVersions;
+    this.startMetadata = startMetadata;
+    this.endMetadata = endMetadata;
   }
 
   @JsonProperty
@@ -61,36 +73,54 @@ public class SegmentInsertAction implements TaskAction<Set<DataSegment>>
   }
 
   @JsonProperty
-  public boolean isAllowOlderVersions()
+  public DataSourceMetadata getStartMetadata()
   {
-    return allowOlderVersions;
+    return startMetadata;
   }
 
-  public SegmentInsertAction withAllowOlderVersions(boolean _allowOlderVersions)
+  @JsonProperty
+  public DataSourceMetadata getEndMetadata()
   {
-    return new SegmentInsertAction(segments, _allowOlderVersions);
+    return endMetadata;
   }
 
-  public TypeReference<Set<DataSegment>> getReturnTypeReference()
+  public TypeReference<SegmentPublishResult> getReturnTypeReference()
   {
-    return new TypeReference<Set<DataSegment>>() {};
+    return new TypeReference<SegmentPublishResult>()
+    {
+    };
   }
 
+  /**
+   * Behaves similarly to
+   * {@link io.druid.indexing.overlord.IndexerMetadataStorageCoordinator#announceHistoricalSegments(Set, DataSourceMetadata, DataSourceMetadata)},
+   * including the possibility of returning null in case of metadata transaction failure.
+   */
   @Override
-  public Set<DataSegment> perform(Task task, TaskActionToolbox toolbox) throws IOException
+  public SegmentPublishResult perform(Task task, TaskActionToolbox toolbox) throws IOException
   {
-    toolbox.verifyTaskLocksAndSinglePartitionSettitude(task, segments, true);
+    toolbox.verifyTaskLocks(task, segments);
 
-    final Set<DataSegment> retVal = toolbox.getIndexerDBCoordinator().announceHistoricalSegments(segments);
+    final SegmentPublishResult retVal = toolbox.getIndexerMetadataStorageCoordinator().announceHistoricalSegments(
+        segments,
+        startMetadata,
+        endMetadata
+    );
 
     // Emit metrics
     final ServiceMetricEvent.Builder metricBuilder = new ServiceMetricEvent.Builder()
-        .setUser2(task.getDataSource())
-        .setUser4(task.getType());
+        .setDimension(DruidMetrics.DATASOURCE, task.getDataSource())
+        .setDimension(DruidMetrics.TASK_TYPE, task.getType());
 
-    for (DataSegment segment : segments) {
-      metricBuilder.setUser5(segment.getInterval().toString());
-      toolbox.getEmitter().emit(metricBuilder.build("indexer/segment/bytes", segment.getSize()));
+    if (retVal.isSuccess()) {
+      toolbox.getEmitter().emit(metricBuilder.build("segment/txn/success", 1));
+    } else {
+      toolbox.getEmitter().emit(metricBuilder.build("segment/txn/failure", 1));
+    }
+
+    for (DataSegment segment : retVal.getSegments()) {
+      metricBuilder.setDimension(DruidMetrics.INTERVAL, segment.getInterval().toString());
+      toolbox.getEmitter().emit(metricBuilder.build("segment/added/bytes", segment.getSize()));
     }
 
     return retVal;
@@ -107,6 +137,8 @@ public class SegmentInsertAction implements TaskAction<Set<DataSegment>>
   {
     return "SegmentInsertAction{" +
            "segments=" + segments +
+           ", startMetadata=" + startMetadata +
+           ", endMetadata=" + endMetadata +
            '}';
   }
 }

@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.cli;
@@ -23,9 +23,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import com.google.inject.name.Names;
 import com.google.inject.util.Providers;
 import com.metamx.common.logger.Logger;
-import io.airlift.command.Command;
+import io.airlift.airline.Command;
 import io.druid.guice.IndexingServiceFirehoseModule;
 import io.druid.guice.IndexingServiceModuleHelper;
 import io.druid.guice.IndexingServiceTaskLogsModule;
@@ -35,7 +36,7 @@ import io.druid.guice.LazySingleton;
 import io.druid.guice.LifecycleModule;
 import io.druid.guice.ManageLifecycle;
 import io.druid.guice.annotations.Self;
-import io.druid.segment.realtime.firehose.ChatHandlerProvider;
+import io.druid.indexing.common.config.TaskConfig;
 import io.druid.indexing.overlord.ForkingTaskRunner;
 import io.druid.indexing.overlord.TaskRunner;
 import io.druid.indexing.worker.Worker;
@@ -43,9 +44,11 @@ import io.druid.indexing.worker.WorkerCuratorCoordinator;
 import io.druid.indexing.worker.WorkerTaskMonitor;
 import io.druid.indexing.worker.config.WorkerConfig;
 import io.druid.indexing.worker.http.WorkerResource;
+import io.druid.segment.realtime.firehose.ChatHandlerProvider;
 import io.druid.server.DruidNode;
-import io.druid.server.initialization.JettyServerInitializer;
+import io.druid.server.initialization.jetty.JettyServerInitializer;
 import org.eclipse.jetty.server.Server;
+import org.joda.time.DateTime;
 
 import java.util.List;
 
@@ -65,16 +68,20 @@ public class CliMiddleManager extends ServerRunnable
   }
 
   @Override
-  protected List<Object> getModules()
+  protected List<? extends Module> getModules()
   {
-    return ImmutableList.<Object>of(
+    return ImmutableList.<Module>of(
         new Module()
         {
           @Override
           public void configure(Binder binder)
           {
+            binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/middlemanager");
+            binder.bindConstant().annotatedWith(Names.named("servicePort")).to(8091);
+
             IndexingServiceModuleHelper.configureTaskRunnerConfigs(binder);
 
+            JsonConfigProvider.bind(binder, "druid.indexer.task", TaskConfig.class);
             JsonConfigProvider.bind(binder, "druid.worker", WorkerConfig.class);
 
             binder.bind(TaskRunner.class).to(ForkingTaskRunner.class);
@@ -97,7 +104,7 @@ public class CliMiddleManager extends ServerRunnable
           public Worker getWorker(@Self DruidNode node, WorkerConfig config)
           {
             return new Worker(
-                node.getHost(),
+                node.getHostAndPort(),
                 config.getIp(),
                 config.getCapacity(),
                 config.getVersion()

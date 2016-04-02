@@ -1,34 +1,28 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.incremental;
 
-import com.google.common.base.Function;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
+import io.druid.data.input.impl.DimensionsSpec;
 import io.druid.data.input.impl.InputRowParser;
-import io.druid.data.input.impl.SpatialDimensionSchema;
 import io.druid.granularity.QueryGranularity;
 import io.druid.query.aggregation.AggregatorFactory;
-
-import java.util.Collections;
-import java.util.List;
 
 /**
  */
@@ -36,22 +30,19 @@ public class IncrementalIndexSchema
 {
   private final long minTimestamp;
   private final QueryGranularity gran;
-  private final List<String> dimensions;
-  private final List<SpatialDimensionSchema> spatialDimensions;
+  private final DimensionsSpec dimensionsSpec;
   private final AggregatorFactory[] metrics;
 
   public IncrementalIndexSchema(
       long minTimestamp,
       QueryGranularity gran,
-      List<String> dimensions,
-      List<SpatialDimensionSchema> spatialDimensions,
+      DimensionsSpec dimensionsSpec,
       AggregatorFactory[] metrics
   )
   {
     this.minTimestamp = minTimestamp;
     this.gran = gran;
-    this.dimensions = dimensions;
-    this.spatialDimensions = spatialDimensions;
+    this.dimensionsSpec = dimensionsSpec;
     this.metrics = metrics;
   }
 
@@ -65,14 +56,9 @@ public class IncrementalIndexSchema
     return gran;
   }
 
-  public List<String> getDimensions()
+  public DimensionsSpec getDimensionsSpec()
   {
-    return dimensions;
-  }
-
-  public List<SpatialDimensionSchema> getSpatialDimensions()
-  {
-    return spatialDimensions;
+    return dimensionsSpec;
   }
 
   public AggregatorFactory[] getMetrics()
@@ -84,16 +70,14 @@ public class IncrementalIndexSchema
   {
     private long minTimestamp;
     private QueryGranularity gran;
-    private List<String> dimensions;
-    private List<SpatialDimensionSchema> spatialDimensions;
+    private DimensionsSpec dimensionsSpec;
     private AggregatorFactory[] metrics;
 
     public Builder()
     {
       this.minTimestamp = 0L;
       this.gran = QueryGranularity.NONE;
-      this.dimensions = Lists.newArrayList();
-      this.spatialDimensions = Lists.newArrayList();
+      this.dimensionsSpec = new DimensionsSpec(null, null, null);
       this.metrics = new AggregatorFactory[]{};
     }
 
@@ -109,41 +93,22 @@ public class IncrementalIndexSchema
       return this;
     }
 
-    public Builder withDimensions(Iterable<String> dimensions)
+    public Builder withDimensionsSpec(DimensionsSpec dimensionsSpec)
     {
-      this.dimensions = Lists.newArrayList(
-          Iterables.transform(
-              dimensions, new Function<String, String>()
-          {
-            @Override
-            public String apply(String input)
-            {
-              return input.toLowerCase();
-            }
-          }
-          )
-      );
-      Collections.sort(this.dimensions);
+      this.dimensionsSpec = dimensionsSpec;
       return this;
     }
 
-    public Builder withSpatialDimensions(InputRowParser parser)
+    public Builder withDimensionsSpec(InputRowParser parser)
     {
       if (parser != null
           && parser.getParseSpec() != null
-          && parser.getParseSpec().getDimensionsSpec() != null
-          && parser.getParseSpec().getDimensionsSpec().getSpatialDimensions() != null) {
-        this.spatialDimensions = parser.getParseSpec().getDimensionsSpec().getSpatialDimensions();
+          && parser.getParseSpec().getDimensionsSpec() != null) {
+        this.dimensionsSpec = parser.getParseSpec().getDimensionsSpec();
       } else {
-        this.spatialDimensions = Lists.newArrayList();
+        this.dimensionsSpec = new DimensionsSpec(null, null, null);
       }
 
-      return this;
-    }
-
-    public Builder withSpatialDimensions(List<SpatialDimensionSchema> spatialDimensions)
-    {
-      this.spatialDimensions = spatialDimensions;
       return this;
     }
 
@@ -156,7 +121,7 @@ public class IncrementalIndexSchema
     public IncrementalIndexSchema build()
     {
       return new IncrementalIndexSchema(
-          minTimestamp, gran, dimensions, spatialDimensions, metrics
+          minTimestamp, gran, dimensionsSpec, metrics
       );
     }
   }

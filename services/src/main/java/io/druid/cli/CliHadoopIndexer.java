@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.cli;
@@ -23,12 +23,11 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
 import com.google.inject.Inject;
 import com.metamx.common.logger.Logger;
-import io.airlift.command.Arguments;
-import io.airlift.command.Command;
-import io.airlift.command.Option;
+import io.airlift.airline.Arguments;
+import io.airlift.airline.Command;
+import io.airlift.airline.Option;
+import io.druid.guice.ExtensionsConfig;
 import io.druid.initialization.Initialization;
-import io.druid.server.initialization.ExtensionsConfig;
-import io.tesla.aether.internal.DefaultTeslaAether;
 
 import java.io.File;
 import java.lang.reflect.Method;
@@ -46,20 +45,21 @@ import java.util.List;
 public class CliHadoopIndexer implements Runnable
 {
 
-  private static String defaultHadoopCoordinates = "org.apache.hadoop:hadoop-client:2.3.0";
+  private static final String DEFAULT_HADOOP_COORDINATES = "org.apache.hadoop:hadoop-client:2.3.0";
 
   private static final Logger log = new Logger(CliHadoopIndexer.class);
 
   @Arguments(description = "A JSON object or the path to a file that contains a JSON object", required = true)
   private String argumentSpec;
 
-  @Option(name = "hadoop",
-          description = "The maven coordinates to the version of hadoop to run with. Defaults to org.apache.hadoop:hadoop-client:2.3.0")
-  private String hadoopCoordinates = defaultHadoopCoordinates;
+  @Option(name = {"-c", "--coordinate", "hadoopDependencies"},
+          description = "extra dependencies to pull down (e.g. non-default hadoop coordinates or extra hadoop jars)")
+  private List<String> coordinates;
 
-  @Option(name = "hadoopDependencies",
-          description = "The maven coordinates to the version of hadoop and all dependencies to run with. Defaults to using org.apache.hadoop:hadoop-client:2.3.0")
-  private List<String> hadoopDependencyCoordinates = Arrays.<String>asList(defaultHadoopCoordinates);
+  @Option(name = "--no-default-hadoop",
+          description = "don't pull down the default hadoop version (currently " + DEFAULT_HADOOP_COORDINATES + ")",
+          required = false)
+  public boolean noDefaultHadoop;
 
   @Inject
   private ExtensionsConfig extensionsConfig = null;
@@ -69,14 +69,18 @@ public class CliHadoopIndexer implements Runnable
   public void run()
   {
     try {
-      final DefaultTeslaAether aetherClient = Initialization.getAetherClient(extensionsConfig);
+      final List<String> allCoordinates = Lists.newArrayList();
+      if (coordinates != null) {
+        allCoordinates.addAll(coordinates);
+      }
+      if (!noDefaultHadoop) {
+        allCoordinates.add(DEFAULT_HADOOP_COORDINATES);
+      }
 
       final List<URL> extensionURLs = Lists.newArrayList();
-      for (String coordinate : extensionsConfig.getCoordinates()) {
-        final ClassLoader coordinateLoader = Initialization.getClassLoaderForCoordinates(
-            aetherClient, coordinate
-        );
-        extensionURLs.addAll(Arrays.asList(((URLClassLoader) coordinateLoader).getURLs()));
+      for (final File extension : Initialization.getExtensionFilesToLoad(extensionsConfig)) {
+        final ClassLoader extensionLoader = Initialization.getClassLoaderForExtension(extension);
+        extensionURLs.addAll(Arrays.asList(((URLClassLoader) extensionLoader).getURLs()));
       }
 
       final List<URL> nonHadoopURLs = Lists.newArrayList();
@@ -85,10 +89,8 @@ public class CliHadoopIndexer implements Runnable
       final List<URL> driverURLs = Lists.newArrayList();
       driverURLs.addAll(nonHadoopURLs);
       // put hadoop dependencies last to avoid jets3t & apache.httpcore version conflicts
-      for (String coordinate : hadoopDependencyCoordinates) {
-        final ClassLoader hadoopLoader = Initialization.getClassLoaderForCoordinates(
-            aetherClient, coordinate
-        );
+      for (File hadoopDependency : Initialization.getHadoopDependencyFilesToLoad(allCoordinates, extensionsConfig)) {
+        final ClassLoader hadoopLoader = Initialization.getClassLoaderForExtension(hadoopDependency);
         driverURLs.addAll(Arrays.asList(((URLClassLoader) hadoopLoader).getURLs()));
       }
 

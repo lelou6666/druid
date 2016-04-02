@@ -1,25 +1,26 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.overlord.config;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.druid.curator.CuratorUtils;
 import org.joda.time.Period;
 
 import javax.validation.constraints.Min;
@@ -34,23 +35,31 @@ public class RemoteTaskRunnerConfig
   private Period taskAssignmentTimeout = new Period("PT5M");
 
   @JsonProperty
-  private boolean compressZnodes = false;
+  @NotNull
+  private Period taskCleanupTimeout = new Period("PT15M");
 
   @JsonProperty
   private String minWorkerVersion = "0";
 
   @JsonProperty
   @Min(10 * 1024)
-  private long maxZnodeBytes = 512 * 1024;
+  private int maxZnodeBytes = CuratorUtils.DEFAULT_MAX_ZNODE_BYTES;
+
+  @JsonProperty
+  private Period taskShutdownLinkTimeout = new Period("PT1M");
+
+  @JsonProperty
+  @Min(1)
+  private int pendingTasksRunnerNumThreads = 3;
 
   public Period getTaskAssignmentTimeout()
   {
     return taskAssignmentTimeout;
   }
 
-  public boolean isCompressZnodes()
-  {
-    return compressZnodes;
+  @JsonProperty
+  public Period getTaskCleanupTimeout(){
+    return taskCleanupTimeout;
   }
 
   public String getMinWorkerVersion()
@@ -58,8 +67,75 @@ public class RemoteTaskRunnerConfig
     return minWorkerVersion;
   }
 
-  public long getMaxZnodeBytes()
+  public int getMaxZnodeBytes()
   {
     return maxZnodeBytes;
+  }
+
+  public Period getTaskShutdownLinkTimeout()
+  {
+    return taskShutdownLinkTimeout;
+  }
+
+
+  public int getPendingTasksRunnerNumThreads()
+  {
+    return pendingTasksRunnerNumThreads;
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+
+    RemoteTaskRunnerConfig that = (RemoteTaskRunnerConfig) o;
+
+    if (maxZnodeBytes != that.maxZnodeBytes) {
+      return false;
+    }
+    if (pendingTasksRunnerNumThreads != that.pendingTasksRunnerNumThreads) {
+      return false;
+    }
+    if (!taskAssignmentTimeout.equals(that.taskAssignmentTimeout)) {
+      return false;
+    }
+    if (!taskCleanupTimeout.equals(that.taskCleanupTimeout)) {
+      return false;
+    }
+    if (!minWorkerVersion.equals(that.minWorkerVersion)) {
+      return false;
+    }
+    return taskShutdownLinkTimeout.equals(that.taskShutdownLinkTimeout);
+
+  }
+
+  @Override
+  public int hashCode()
+  {
+    int result = taskAssignmentTimeout.hashCode();
+    result = 31 * result + taskCleanupTimeout.hashCode();
+    result = 31 * result + minWorkerVersion.hashCode();
+    result = 31 * result + maxZnodeBytes;
+    result = 31 * result + taskShutdownLinkTimeout.hashCode();
+    result = 31 * result + pendingTasksRunnerNumThreads;
+    return result;
+  }
+
+  @Override
+  public String toString()
+  {
+    return "RemoteTaskRunnerConfig{" +
+           "taskAssignmentTimeout=" + taskAssignmentTimeout +
+           ", taskCleanupTimeout=" + taskCleanupTimeout +
+           ", minWorkerVersion='" + minWorkerVersion + '\'' +
+           ", maxZnodeBytes=" + maxZnodeBytes +
+           ", taskShutdownLinkTimeout=" + taskShutdownLinkTimeout +
+           ", pendingTasksRunnerNumThreads=" + pendingTasksRunnerNumThreads +
+           '}';
   }
 }

@@ -1,28 +1,29 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.log;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
-import com.google.common.io.Closeables;
 import com.metamx.common.concurrent.ScheduledExecutors;
+import com.metamx.common.guava.CloseQuietly;
 import com.metamx.common.lifecycle.LifecycleStart;
 import com.metamx.common.lifecycle.LifecycleStop;
 import io.druid.server.RequestLogLine;
@@ -31,8 +32,9 @@ import org.joda.time.Duration;
 import org.joda.time.MutableDateTime;
 
 import java.io.File;
-import java.io.FileWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -47,7 +49,7 @@ public class FileRequestLogger implements RequestLogger
   private final Object lock = new Object();
 
   private volatile DateTime currentDay;
-  private volatile FileWriter fileWriter;
+  private volatile OutputStreamWriter fileWriter;
 
   public FileRequestLogger(ObjectMapper objectMapper, ScheduledExecutorService exec, File baseDir)
   {
@@ -66,7 +68,10 @@ public class FileRequestLogger implements RequestLogger
       mutableDateTime.setMillisOfDay(0);
       currentDay = mutableDateTime.toDateTime();
 
-      fileWriter = new FileWriter(new File(baseDir, currentDay.toString("yyyy-MM-dd'.log'")), true);
+      fileWriter = new OutputStreamWriter(
+          new FileOutputStream(new File(baseDir, currentDay.toString("yyyy-MM-dd'.log'")), true),
+          Charsets.UTF_8
+      );
       long nextDay = currentDay.plusDays(1).getMillis();
       Duration delay = new Duration(nextDay - new DateTime().getMillis());
 
@@ -83,8 +88,11 @@ public class FileRequestLogger implements RequestLogger
 
               try {
                 synchronized (lock) {
-                  Closeables.closeQuietly(fileWriter);
-                  fileWriter = new FileWriter(new File(baseDir, currentDay.toString()), true);
+                  CloseQuietly.close(fileWriter);
+                  fileWriter = new OutputStreamWriter(
+                      new FileOutputStream(new File(baseDir, currentDay.toString()), true),
+                      Charsets.UTF_8
+                  );
                 }
               }
               catch (Exception e) {
@@ -105,12 +113,12 @@ public class FileRequestLogger implements RequestLogger
   public void stop()
   {
     synchronized (lock) {
-      Closeables.closeQuietly(fileWriter);
+      CloseQuietly.close(fileWriter);
     }
   }
 
   @Override
-  public void log(RequestLogLine requestLogLine) throws Exception
+  public void log(RequestLogLine requestLogLine) throws IOException
   {
     synchronized (lock) {
       fileWriter.write(

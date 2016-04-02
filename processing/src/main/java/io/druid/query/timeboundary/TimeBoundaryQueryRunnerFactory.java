@@ -1,24 +1,25 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.timeboundary;
 
+import com.google.inject.Inject;
 import com.metamx.common.ISE;
 import com.metamx.common.guava.BaseSequence;
 import com.metamx.common.guava.Sequence;
@@ -27,11 +28,14 @@ import io.druid.query.Query;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryToolChest;
+import io.druid.query.QueryWatcher;
 import io.druid.query.Result;
 import io.druid.segment.Segment;
 import io.druid.segment.StorageAdapter;
+import org.joda.time.DateTime;
 
 import java.util.Iterator;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -40,6 +44,13 @@ public class TimeBoundaryQueryRunnerFactory
     implements QueryRunnerFactory<Result<TimeBoundaryResultValue>, TimeBoundaryQuery>
 {
   private static final TimeBoundaryQueryQueryToolChest toolChest = new TimeBoundaryQueryQueryToolChest();
+  private final QueryWatcher queryWatcher;
+
+  @Inject
+  public TimeBoundaryQueryRunnerFactory(QueryWatcher queryWatcher)
+  {
+    this.queryWatcher = queryWatcher;
+  }
 
   @Override
   public QueryRunner<Result<TimeBoundaryResultValue>> createRunner(final Segment segment)
@@ -52,9 +63,7 @@ public class TimeBoundaryQueryRunnerFactory
       ExecutorService queryExecutor, Iterable<QueryRunner<Result<TimeBoundaryResultValue>>> queryRunners
   )
   {
-    return new ChainedExecutionQueryRunner<Result<TimeBoundaryResultValue>>(
-        queryExecutor, toolChest.getOrdering(), queryRunners
-    );
+    return new ChainedExecutionQueryRunner<>(queryExecutor, queryWatcher, queryRunners);
   }
 
   @Override
@@ -73,7 +82,10 @@ public class TimeBoundaryQueryRunnerFactory
     }
 
     @Override
-    public Sequence<Result<TimeBoundaryResultValue>> run(Query<Result<TimeBoundaryResultValue>> input)
+    public Sequence<Result<TimeBoundaryResultValue>> run(
+        final Query<Result<TimeBoundaryResultValue>> input,
+        final Map<String, Object> responseContext
+    )
     {
       if (!(input instanceof TimeBoundaryQuery)) {
         throw new ISE("Got a [%s] which isn't a %s", input.getClass(), TimeBoundaryQuery.class);
@@ -81,7 +93,7 @@ public class TimeBoundaryQueryRunnerFactory
 
       final TimeBoundaryQuery legacyQuery = (TimeBoundaryQuery) input;
 
-      return new BaseSequence<Result<TimeBoundaryResultValue>, Iterator<Result<TimeBoundaryResultValue>>>(
+      return new BaseSequence<>(
           new BaseSequence.IteratorMaker<Result<TimeBoundaryResultValue>, Iterator<Result<TimeBoundaryResultValue>>>()
           {
             @Override
@@ -93,10 +105,18 @@ public class TimeBoundaryQueryRunnerFactory
                 );
               }
 
+              final DateTime minTime = legacyQuery.getBound().equalsIgnoreCase(TimeBoundaryQuery.MAX_TIME)
+                                       ? null
+                                       : adapter.getMinTime();
+              final DateTime maxTime = legacyQuery.getBound().equalsIgnoreCase(TimeBoundaryQuery.MIN_TIME)
+                                       ? null
+                                       : adapter.getMaxTime();
+
+
               return legacyQuery.buildResult(
                   adapter.getInterval().getStart(),
-                  adapter.getMinTime(),
-                  adapter.getMaxTime()
+                  minTime,
+                  maxTime
               ).iterator();
             }
 

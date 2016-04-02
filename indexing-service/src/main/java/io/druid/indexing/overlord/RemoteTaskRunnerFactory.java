@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.overlord;
@@ -22,45 +22,79 @@ package io.druid.indexing.overlord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Supplier;
 import com.google.inject.Inject;
+import com.metamx.common.concurrent.ScheduledExecutorFactory;
+import com.metamx.common.logger.Logger;
 import com.metamx.http.client.HttpClient;
 import io.druid.curator.cache.SimplePathChildrenCacheFactory;
 import io.druid.guice.annotations.Global;
+import io.druid.indexing.overlord.autoscaling.NoopResourceManagementStrategy;
+import io.druid.indexing.overlord.autoscaling.ResourceManagementSchedulerConfig;
+import io.druid.indexing.overlord.autoscaling.ResourceManagementStrategy;
+import io.druid.indexing.overlord.autoscaling.SimpleResourceManagementConfig;
+import io.druid.indexing.overlord.autoscaling.SimpleResourceManagementStrategy;
 import io.druid.indexing.overlord.config.RemoteTaskRunnerConfig;
-import io.druid.indexing.overlord.setup.WorkerSetupData;
-import io.druid.server.initialization.ZkPathsConfig;
+import io.druid.indexing.overlord.setup.WorkerBehaviorConfig;
+import io.druid.server.initialization.IndexerZkConfig;
 import org.apache.curator.framework.CuratorFramework;
 
+import java.util.concurrent.ScheduledExecutorService;
+
 /**
-*/
-public class RemoteTaskRunnerFactory implements TaskRunnerFactory
+ */
+public class RemoteTaskRunnerFactory implements TaskRunnerFactory<RemoteTaskRunner>
 {
+  public static final String TYPE_NAME = "remote";
+  private static final Logger LOG = new Logger(RemoteTaskRunnerFactory.class);
   private final CuratorFramework curator;
   private final RemoteTaskRunnerConfig remoteTaskRunnerConfig;
-  private final ZkPathsConfig zkPaths;
+  private final IndexerZkConfig zkPaths;
   private final ObjectMapper jsonMapper;
-  private final Supplier<WorkerSetupData> setupDataWatch;
   private final HttpClient httpClient;
+  private final Supplier<WorkerBehaviorConfig> workerConfigRef;
+  private final ScheduledExecutorService cleanupExec;
+  private final SimpleResourceManagementConfig config;
+  private final ResourceManagementSchedulerConfig resourceManagementSchedulerConfig;
+  private final ScheduledExecutorService resourceManagementExec;
 
   @Inject
   public RemoteTaskRunnerFactory(
       final CuratorFramework curator,
       final RemoteTaskRunnerConfig remoteTaskRunnerConfig,
-      final ZkPathsConfig zkPaths,
+      final IndexerZkConfig zkPaths,
       final ObjectMapper jsonMapper,
-      final Supplier<WorkerSetupData> setupDataWatch,
-      @Global final HttpClient httpClient
-  ) {
+      @Global final HttpClient httpClient,
+      final Supplier<WorkerBehaviorConfig> workerConfigRef,
+      final ScheduledExecutorFactory factory,
+      final SimpleResourceManagementConfig config,
+      final ResourceManagementSchedulerConfig resourceManagementSchedulerConfig
+  )
+  {
     this.curator = curator;
     this.remoteTaskRunnerConfig = remoteTaskRunnerConfig;
     this.zkPaths = zkPaths;
     this.jsonMapper = jsonMapper;
-    this.setupDataWatch = setupDataWatch;
     this.httpClient = httpClient;
+    this.workerConfigRef = workerConfigRef;
+    this.cleanupExec = factory.create(1, "RemoteTaskRunner-Scheduled-Cleanup--%d");
+    this.config = config;
+    this.resourceManagementSchedulerConfig = resourceManagementSchedulerConfig;
+    this.resourceManagementExec = factory.create(1, "RemoteTaskRunner-ResourceManagement--%d");
   }
 
   @Override
-  public TaskRunner build()
+  public RemoteTaskRunner build()
   {
+    final ResourceManagementStrategy<WorkerTaskRunner> resourceManagementStrategy;
+    if (resourceManagementSchedulerConfig.isDoAutoscale()) {
+      resourceManagementStrategy = new SimpleResourceManagementStrategy(
+          config,
+          workerConfigRef,
+          resourceManagementSchedulerConfig,
+          resourceManagementExec
+      );
+    } else {
+      resourceManagementStrategy = new NoopResourceManagementStrategy<>();
+    }
     return new RemoteTaskRunner(
         jsonMapper,
         remoteTaskRunnerConfig,
@@ -68,10 +102,12 @@ public class RemoteTaskRunnerFactory implements TaskRunnerFactory
         curator,
         new SimplePathChildrenCacheFactory
             .Builder()
-            .withCompressed(remoteTaskRunnerConfig.isCompressZnodes())
+            .withCompressed(true)
             .build(),
-        setupDataWatch,
-        httpClient
+        httpClient,
+        workerConfigRef,
+        cleanupExec,
+        resourceManagementStrategy
     );
   }
 }

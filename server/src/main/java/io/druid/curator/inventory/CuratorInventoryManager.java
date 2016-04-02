@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.curator.inventory;
@@ -23,6 +23,7 @@ import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.MapMaker;
+import com.google.common.collect.Sets;
 import com.metamx.common.lifecycle.LifecycleStart;
 import com.metamx.common.lifecycle.LifecycleStop;
 import com.metamx.common.logger.Logger;
@@ -37,6 +38,7 @@ import org.apache.curator.framework.recipes.cache.PathChildrenCacheListener;
 import org.apache.curator.utils.ZKPaths;
 
 import java.io.IOException;
+import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
@@ -62,6 +64,7 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
   private final CuratorInventoryManagerStrategy<ContainerClass, InventoryClass> strategy;
 
   private final ConcurrentMap<String, ContainerHolder> containers;
+  private final Set<ContainerHolder> uninitializedInventory;
   private final PathChildrenCacheFactory cacheFactory;
 
   private volatile PathChildrenCache childrenCache;
@@ -78,8 +81,12 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
     this.strategy = strategy;
 
     this.containers = new MapMaker().makeMap();
+    this.uninitializedInventory = Sets.newConcurrentHashSet();
 
-    this.cacheFactory = new SimplePathChildrenCacheFactory(true, true, new ShutdownNowIgnoringExecutorService(exec));
+    //NOTE: cacheData is temporarily set to false and we get data directly from ZK on each event.
+    //this is a workaround to solve curator's out-of-order events problem
+    //https://issues.apache.org/jira/browse/CURATOR-191
+    this.cacheFactory = new SimplePathChildrenCacheFactory(false, true, new ShutdownNowIgnoringExecutorService(exec));
   }
 
   @LifecycleStart
@@ -96,7 +103,7 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
     childrenCache.getListenable().addListener(new ContainerCacheListener());
 
     try {
-      childrenCache.start();
+      childrenCache.start(PathChildrenCache.StartMode.POST_INITIALIZED_EVENT);
     }
     catch (Exception e) {
       synchronized (lock) {
@@ -161,10 +168,20 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
     );
   }
 
+  private byte[] getZkDataForNode(String path) {
+    try {
+      return curatorFramework.getData().decompressed().forPath(path);
+    } catch(Exception ex) {
+      log.warn(ex, "Exception while getting data for node %s", path);
+      return null;
+    }
+  }
+
   private class ContainerHolder
   {
     private final AtomicReference<ContainerClass> container;
     private final PathChildrenCache cache;
+    private boolean initialized = false;
 
     ContainerHolder(
         ContainerClass container,
@@ -193,21 +210,29 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
 
   private class ContainerCacheListener implements PathChildrenCacheListener
   {
+    private volatile boolean containersInitialized = false;
+    private volatile boolean doneInitializing = false;
+
     @Override
     public void childEvent(CuratorFramework client, PathChildrenCacheEvent event) throws Exception
     {
-      final ChildData child = event.getData();
-      if (child == null) {
-        return;
-      }
-
-      final String containerKey = ZKPaths.getNodeFromPath(child.getPath());
-      final ContainerClass container;
-
       switch (event.getType()) {
         case CHILD_ADDED:
           synchronized (lock) {
-            container = strategy.deserializeContainer(child.getData());
+            final ChildData child = event.getData();
+
+            byte[] data = getZkDataForNode(child.getPath());
+            if(data == null) {
+              log.info("Ignoring event: Type - %s , Path - %s , Version - %s",
+                  event.getType(),
+                  child.getPath(),
+                  child.getStat().getVersion());
+              return;
+            }
+
+            final String containerKey = ZKPaths.getNodeFromPath(child.getPath());
+
+            final ContainerClass container = strategy.deserializeContainer(data);
 
             // This would normally be a race condition, but the only thing that should be mutating the containers
             // map is this listener, which should never run concurrently.  If the same container is going to disappear
@@ -221,8 +246,8 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
 
               containers.put(containerKey, new ContainerHolder(container, inventoryCache));
 
-              log.info("Starting inventory cache for %s, inventoryPath %s", containerKey, inventoryPath);
-              inventoryCache.start();
+              log.debug("Starting inventory cache for %s, inventoryPath %s", containerKey, inventoryPath);
+              inventoryCache.start(PathChildrenCache.StartMode.POST_INITIALIZED_EVENT);
               strategy.newContainer(container);
             }
 
@@ -230,6 +255,9 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
           }
         case CHILD_REMOVED:
           synchronized (lock) {
+            final ChildData child = event.getData();
+            final String containerKey = ZKPaths.getNodeFromPath(child.getPath());
+
             final ContainerHolder removed = containers.remove(containerKey);
             if (removed == null) {
               log.warn("Container[%s] removed that wasn't a container!?", child.getPath());
@@ -238,28 +266,82 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
 
             // This close() call actually calls shutdownNow() on the executor registered with the Cache object, it
             // better have its own executor or ignore shutdownNow() calls...
-            log.info("Closing inventory cache for %s. Also removing listeners.", containerKey);
+            log.debug("Closing inventory cache for %s. Also removing listeners.", containerKey);
             removed.getCache().getListenable().clear();
             removed.getCache().close();
             strategy.deadContainer(removed.getContainer());
+
+            // also remove node from uninitilized, in case a nodes gets removed while we are starting up
+            synchronized (removed) {
+              markInventoryInitialized(removed);
+            }
 
             break;
           }
         case CHILD_UPDATED:
           synchronized (lock) {
-            container = strategy.deserializeContainer(child.getData());
+            final ChildData child = event.getData();
 
-            ContainerHolder oldContainer = containers.get(containerKey);
-            if (oldContainer == null) {
+            byte[] data = getZkDataForNode(child.getPath());
+            if (data == null) {
+              log.info("Ignoring event: Type - %s , Path - %s , Version - %s",
+                  event.getType(),
+                  child.getPath(),
+                  child.getStat().getVersion());
+              return;
+            }
+
+            final String containerKey = ZKPaths.getNodeFromPath(child.getPath());
+
+            final ContainerClass container = strategy.deserializeContainer(data);
+
+            log.debug("Container[%s] updated.", child.getPath());
+            ContainerHolder holder = containers.get(containerKey);
+            if (holder == null) {
               log.warn("Container update[%s], but the old container didn't exist!?  Ignoring.", child.getPath());
             } else {
-              synchronized (oldContainer) {
-                oldContainer.setContainer(strategy.updateContainer(oldContainer.getContainer(), container));
+              synchronized (holder) {
+                holder.setContainer(strategy.updateContainer(holder.getContainer(), container));
               }
             }
 
             break;
           }
+        case INITIALIZED:
+          synchronized (lock) {
+            // must await initialized of all containerholders
+            for (ContainerHolder holder : containers.values()) {
+              synchronized (holder) {
+                if (!holder.initialized) {
+                  uninitializedInventory.add(holder);
+                }
+              }
+            }
+            containersInitialized = true;
+            maybeDoneInitializing();
+            break;
+          }
+      }
+    }
+
+    // must be run in synchronized(lock) { synchronized(holder) { ... } } block
+    private void markInventoryInitialized(final ContainerHolder holder)
+    {
+      holder.initialized = true;
+      uninitializedInventory.remove(holder);
+      maybeDoneInitializing();
+    }
+
+    private void maybeDoneInitializing()
+    {
+      if (doneInitializing) {
+        return;
+      }
+
+      // only fire if we are done initializing the parent PathChildrenCache
+      if (containersInitialized && uninitializedInventory.isEmpty()) {
+        doneInitializing = true;
+        strategy.inventoryInitialized();
       }
     }
 
@@ -279,40 +361,76 @@ public class CuratorInventoryManager<ContainerClass, InventoryClass>
       @Override
       public void childEvent(CuratorFramework client, PathChildrenCacheEvent event) throws Exception
       {
-        final ChildData child = event.getData();
-
-        if (child == null) {
-          return;
-        }
-
         final ContainerHolder holder = containers.get(containerKey);
-
         if (holder == null) {
           return;
         }
 
-        final String inventoryKey = ZKPaths.getNodeFromPath(child.getPath());
-
         switch (event.getType()) {
-          case CHILD_ADDED:
-            final InventoryClass addedInventory = strategy.deserializeInventory(child.getData());
+          case CHILD_ADDED: {
+            final ChildData child = event.getData();
+
+            byte[] data = getZkDataForNode(child.getPath());
+            if (data == null) {
+              log.info("Ignoring event: Type - %s , Path - %s , Version - %s",
+                  event.getType(),
+                  child.getPath(),
+                  child.getStat().getVersion());
+              return;
+            }
+
+            final String inventoryKey = ZKPaths.getNodeFromPath(child.getPath());
+            log.debug("CHILD_ADDED[%s] with version[%s]", child.getPath(), event.getData().getStat().getVersion());
+
+            final InventoryClass addedInventory = strategy.deserializeInventory(data);
 
             synchronized (holder) {
               holder.setContainer(strategy.addInventory(holder.getContainer(), inventoryKey, addedInventory));
             }
-
             break;
-          case CHILD_UPDATED:
-            final InventoryClass updatedInventory = strategy.deserializeInventory(child.getData());
+          }
+
+          case CHILD_UPDATED: {
+            final ChildData child = event.getData();
+
+            byte[] data = getZkDataForNode(child.getPath());
+            if (data == null) {
+              log.info("Ignoring event: Type - %s , Path - %s , Version - %s",
+                  event.getType(),
+                  child.getPath(),
+                  child.getStat().getVersion());
+              return;
+            }
+
+            final String inventoryKey = ZKPaths.getNodeFromPath(child.getPath());
+            log.debug("CHILD_UPDATED[%s] with version[%s]", child.getPath(), event.getData().getStat().getVersion());
+
+            final InventoryClass updatedInventory = strategy.deserializeInventory(data);
 
             synchronized (holder) {
               holder.setContainer(strategy.updateInventory(holder.getContainer(), inventoryKey, updatedInventory));
             }
 
             break;
-          case CHILD_REMOVED:
+          }
+
+          case CHILD_REMOVED: {
+            final ChildData child = event.getData();
+            final String inventoryKey = ZKPaths.getNodeFromPath(child.getPath());
+            log.debug("CHILD_REMOVED[%s] with version[%s]", child.getPath(), event.getData().getStat().getVersion());
+
             synchronized (holder) {
               holder.setContainer(strategy.removeInventory(holder.getContainer(), inventoryKey));
+            }
+
+            break;
+          }
+          case INITIALIZED:
+            // make sure to acquire locks in (lock -> holder) order
+            synchronized (lock) {
+              synchronized (holder) {
+                markInventoryInitialized(holder);
+              }
             }
 
             break;

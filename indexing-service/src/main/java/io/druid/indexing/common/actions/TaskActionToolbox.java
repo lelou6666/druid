@@ -1,25 +1,25 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.common.actions;
 
-import com.google.api.client.repackaged.com.google.common.base.Preconditions;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.inject.Inject;
@@ -27,7 +27,7 @@ import com.metamx.common.ISE;
 import com.metamx.emitter.service.ServiceEmitter;
 import io.druid.indexing.common.TaskLock;
 import io.druid.indexing.common.task.Task;
-import io.druid.indexing.overlord.IndexerDBCoordinator;
+import io.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import io.druid.indexing.overlord.TaskLockbox;
 import io.druid.timeline.DataSegment;
 
@@ -37,18 +37,18 @@ import java.util.Set;
 public class TaskActionToolbox
 {
   private final TaskLockbox taskLockbox;
-  private final IndexerDBCoordinator indexerDBCoordinator;
+  private final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator;
   private final ServiceEmitter emitter;
 
   @Inject
   public TaskActionToolbox(
       TaskLockbox taskLockbox,
-      IndexerDBCoordinator indexerDBCoordinator,
+      IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator,
       ServiceEmitter emitter
   )
   {
     this.taskLockbox = taskLockbox;
-    this.indexerDBCoordinator = indexerDBCoordinator;
+    this.indexerMetadataStorageCoordinator = indexerMetadataStorageCoordinator;
     this.emitter = emitter;
   }
 
@@ -57,9 +57,9 @@ public class TaskActionToolbox
     return taskLockbox;
   }
 
-  public IndexerDBCoordinator getIndexerDBCoordinator()
+  public IndexerMetadataStorageCoordinator getIndexerMetadataStorageCoordinator()
   {
-    return indexerDBCoordinator;
+    return indexerMetadataStorageCoordinator;
   }
 
   public ServiceEmitter getEmitter()
@@ -67,42 +67,19 @@ public class TaskActionToolbox
     return emitter;
   }
 
-  public boolean segmentsAreFromSamePartitionSet(
+  public void verifyTaskLocks(
+      final Task task,
       final Set<DataSegment> segments
   )
   {
-    // Verify that these segments are all in the same partition set
-
-    Preconditions.checkArgument(!segments.isEmpty(), "segments nonempty");
-    final DataSegment firstSegment = segments.iterator().next();
-    for (final DataSegment segment : segments) {
-      if (!segment.getDataSource().equals(firstSegment.getDataSource())
-          || !segment.getInterval().equals(firstSegment.getInterval())
-          || !segment.getVersion().equals(firstSegment.getVersion())) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  public void verifyTaskLocksAndSinglePartitionSettitude(
-      final Task task,
-      final Set<DataSegment> segments,
-      final boolean allowOlderVersions
-  )
-  {
-    if (!taskLockCoversSegments(task, segments, allowOlderVersions)) {
+    if (!taskLockCoversSegments(task, segments)) {
       throw new ISE("Segments not covered by locks for task: %s", task.getId());
-    }
-    if (!segmentsAreFromSamePartitionSet(segments)) {
-      throw new ISE("Segments are not in the same partition set: %s", segments);
     }
   }
 
   public boolean taskLockCoversSegments(
       final Task task,
-      final Set<DataSegment> segments,
-      final boolean allowOlderVersions
+      final Set<DataSegment> segments
   )
   {
     // Verify that each of these segments falls under some lock
@@ -112,22 +89,18 @@ public class TaskActionToolbox
     // NOTE: insert some segments from the task but not others.
 
     final List<TaskLock> taskLocks = getTaskLockbox().findLocksForTask(task);
-    for(final DataSegment segment : segments) {
+    for (final DataSegment segment : segments) {
       final boolean ok = Iterables.any(
           taskLocks, new Predicate<TaskLock>()
-      {
-        @Override
-        public boolean apply(TaskLock taskLock)
-        {
-          final boolean versionOk = allowOlderVersions
-                                    ? taskLock.getVersion().compareTo(segment.getVersion()) >= 0
-                                    : taskLock.getVersion().equals(segment.getVersion());
-
-          return versionOk
-                 && taskLock.getDataSource().equals(segment.getDataSource())
-                 && taskLock.getInterval().contains(segment.getInterval());
-        }
-      }
+          {
+            @Override
+            public boolean apply(TaskLock taskLock)
+            {
+              return taskLock.getDataSource().equals(segment.getDataSource())
+                     && taskLock.getInterval().contains(segment.getInterval())
+                     && taskLock.getVersion().compareTo(segment.getVersion()) >= 0;
+            }
+          }
       );
 
       if (!ok) {

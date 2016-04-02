@@ -1,47 +1,49 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.groupby;
 
 import com.google.common.base.Function;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.collect.Lists;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
 import io.druid.collections.StupidPool;
 import io.druid.data.input.MapBasedRow;
 import io.druid.data.input.Row;
+import io.druid.jackson.DefaultObjectMapper;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerTestHelper;
 import io.druid.query.Result;
+import io.druid.query.TestQueryRunners;
 import io.druid.query.timeseries.TimeseriesQuery;
 import io.druid.query.timeseries.TimeseriesQueryRunnerTest;
 import io.druid.query.timeseries.TimeseriesResultValue;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
-import java.util.Collection;
+import java.util.Map;
 
 /**
  */
@@ -50,7 +52,7 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
 {
   @SuppressWarnings("unchecked")
   @Parameterized.Parameters
-  public static Collection<?> constructorFeeder() throws IOException
+  public static Iterable<Object[]> constructorFeeder() throws IOException
   {
     GroupByQueryConfig config = new GroupByQueryConfig();
     config.setMaxIntermediateRows(10000);
@@ -72,66 +74,67 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
 
     final GroupByQueryRunnerFactory factory = new GroupByQueryRunnerFactory(
         engine,
+        QueryRunnerTestHelper.NOOP_QUERYWATCHER,
         configSupplier,
-        new GroupByQueryQueryToolChest(configSupplier, engine)
+        new GroupByQueryQueryToolChest(
+            configSupplier, new DefaultObjectMapper(),
+            engine, TestQueryRunners.pool,
+            QueryRunnerTestHelper.NoopIntervalChunkingQueryRunnerDecorator()
+        ),
+        TestQueryRunners.pool
     );
-
-    final Collection<?> objects = QueryRunnerTestHelper.makeQueryRunners(factory);
-    Object[][] newObjects = new Object[objects.size()][];
-    int i = 0;
-    for (Object object : objects) {
-      if (object instanceof Object[]) {
-        Object[] queryRunnerArray = (Object[]) object;
-
-        Preconditions.checkState(queryRunnerArray.length == 1);
-        Preconditions.checkState(queryRunnerArray[0] instanceof QueryRunner);
-
-        final QueryRunner groupByRunner = (QueryRunner) queryRunnerArray[0];
-        QueryRunner timeseriesRunner = new QueryRunner()
-        {
-          @Override
-          public Sequence run(Query query)
-          {
-            TimeseriesQuery tsQuery = (TimeseriesQuery) query;
-
-            return Sequences.map(
-                groupByRunner.run(
-                    GroupByQuery.builder()
-                        .setDataSource(tsQuery.getDataSource())
-                        .setQuerySegmentSpec(tsQuery.getQuerySegmentSpec())
-                        .setGranularity(tsQuery.getGranularity())
-                        .setDimFilter(tsQuery.getDimensionsFilter())
-                        .setAggregatorSpecs(tsQuery.getAggregatorSpecs())
-                        .setPostAggregatorSpecs(tsQuery.getPostAggregatorSpecs())
-                        .build()
-                ),
-                new Function<Row, Result<TimeseriesResultValue>>()
+    return QueryRunnerTestHelper.transformToConstructionFeeder(
+        Lists.transform(
+            QueryRunnerTestHelper.makeQueryRunners(factory),
+            new Function<QueryRunner<Row>, Object>()
+            {
+              @Nullable
+              @Override
+              public Object apply(final QueryRunner<Row> input)
+              {
+                return new QueryRunner()
                 {
                   @Override
-                  public Result<TimeseriesResultValue> apply(final Row input)
+                  public Sequence run(Query query, Map responseContext)
                   {
-                    MapBasedRow row = (MapBasedRow) input;
+                    TimeseriesQuery tsQuery = (TimeseriesQuery) query;
 
-                    return new Result<TimeseriesResultValue>(
-                        row.getTimestamp(), new TimeseriesResultValue(row.getEvent())
+                    return Sequences.map(
+                        input.run(
+                            GroupByQuery.builder()
+                                        .setDataSource(tsQuery.getDataSource())
+                                        .setQuerySegmentSpec(tsQuery.getQuerySegmentSpec())
+                                        .setGranularity(tsQuery.getGranularity())
+                                        .setDimFilter(tsQuery.getDimensionsFilter())
+                                        .setAggregatorSpecs(tsQuery.getAggregatorSpecs())
+                                        .setPostAggregatorSpecs(tsQuery.getPostAggregatorSpecs())
+                                        .build(),
+                            responseContext
+                        ),
+                        new Function<Row, Result<TimeseriesResultValue>>()
+                        {
+                          @Override
+                          public Result<TimeseriesResultValue> apply(final Row input)
+                          {
+                            MapBasedRow row = (MapBasedRow) input;
+
+                            return new Result<TimeseriesResultValue>(
+                                row.getTimestamp(), new TimeseriesResultValue(row.getEvent())
+                            );
+                          }
+                        }
                     );
                   }
-                }
-            );
-          }
-        };
-
-        newObjects[i] = new Object[]{timeseriesRunner};
-        ++i;
-      }
-    }
-
-    return Arrays.asList(newObjects);
+                };
+              }
+            }
+        )
+    );
   }
 
   public GroupByTimeseriesQueryRunnerTest(QueryRunner runner)
   {
-    super(runner);
+    super(runner, false);
   }
 
   @Override
@@ -145,6 +148,13 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
   public void testFullOnTimeseriesWithFilter()
   {
     // Skip this test because the timeseries test expects a skipped day to be filled in, but group by doesn't
+    // fill anything in.
+  }
+
+  @Override
+  public void testTimeseriesQueryZeroFilling()
+  {
+    // Skip this test because the timeseries test expects skipped hours to be filled in, but group by doesn't
     // fill anything in.
   }
 

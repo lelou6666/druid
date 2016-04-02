@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.select;
@@ -23,45 +23,48 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
-import com.google.common.base.Joiner;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
 import com.google.inject.Inject;
-import com.metamx.common.guava.MergeSequence;
-import com.metamx.common.guava.Sequence;
+import com.metamx.common.StringUtils;
+import com.metamx.common.guava.Comparators;
 import com.metamx.common.guava.nary.BinaryFn;
 import com.metamx.emitter.service.ServiceMetricEvent;
-import io.druid.collections.OrderedMergeSequence;
 import io.druid.granularity.QueryGranularity;
 import io.druid.query.CacheStrategy;
-import io.druid.query.DataSourceUtil;
-import io.druid.query.IntervalChunkingQueryRunner;
+import io.druid.query.DruidMetrics;
+import io.druid.query.IntervalChunkingQueryRunnerDecorator;
 import io.druid.query.Query;
-import io.druid.query.QueryConfig;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
 import io.druid.query.Result;
 import io.druid.query.ResultGranularTimestampComparator;
 import io.druid.query.ResultMergeQueryRunner;
 import io.druid.query.aggregation.MetricManipulationFn;
+import io.druid.query.dimension.DimensionSpec;
 import io.druid.query.filter.DimFilter;
+import io.druid.segment.SegmentDesc;
+import io.druid.timeline.LogicalSegment;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
-import org.joda.time.Minutes;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  */
 public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResultValue>, SelectQuery>
 {
   private static final byte SELECT_QUERY = 0x13;
-  private static final Joiner COMMA_JOIN = Joiner.on(",");
   private static final TypeReference<Object> OBJECT_TYPE_REFERENCE =
       new TypeReference<Object>()
       {
@@ -70,28 +73,31 @@ public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResul
       new TypeReference<Result<SelectResultValue>>()
       {
       };
-  private final QueryConfig config;
+
   private final ObjectMapper jsonMapper;
 
+  private final IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator;
+
   @Inject
-  public SelectQueryQueryToolChest(QueryConfig config, ObjectMapper jsonMapper)
+  public SelectQueryQueryToolChest(ObjectMapper jsonMapper,
+      IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator)
   {
-    this.config = config;
     this.jsonMapper = jsonMapper;
+    this.intervalChunkingQueryRunnerDecorator = intervalChunkingQueryRunnerDecorator;
   }
 
   @Override
-  public QueryRunner<Result<SelectResultValue>> mergeResults(QueryRunner<Result<SelectResultValue>> queryRunner)
+  public QueryRunner<Result<SelectResultValue>> mergeResults(
+      QueryRunner<Result<SelectResultValue>> queryRunner
+  )
   {
     return new ResultMergeQueryRunner<Result<SelectResultValue>>(queryRunner)
     {
       @Override
       protected Ordering<Result<SelectResultValue>> makeOrdering(Query<Result<SelectResultValue>> query)
       {
-        return Ordering.from(
-            new ResultGranularTimestampComparator<SelectResultValue>(
-                ((SelectQuery) query).getGranularity()
-            )
+        return ResultGranularTimestampComparator.create(
+            ((SelectQuery) query).getGranularity(), query.isDescending()
         );
       }
 
@@ -103,32 +109,17 @@ public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResul
         SelectQuery query = (SelectQuery) input;
         return new SelectBinaryFn(
             query.getGranularity(),
-            query.getPagingSpec()
+            query.getPagingSpec(),
+            query.isDescending()
         );
       }
     };
   }
 
   @Override
-  public Sequence<Result<SelectResultValue>> mergeSequences(Sequence<Sequence<Result<SelectResultValue>>> seqOfSequences)
-  {
-    return new OrderedMergeSequence<Result<SelectResultValue>>(getOrdering(), seqOfSequences);
-  }
-
-  @Override
   public ServiceMetricEvent.Builder makeMetricBuilder(SelectQuery query)
   {
-    int numMinutes = 0;
-    for (Interval interval : query.getIntervals()) {
-      numMinutes += Minutes.minutesIn(interval).getMinutes();
-    }
-
-    return new ServiceMetricEvent.Builder()
-        .setUser2(DataSourceUtil.getMetricName(query.getDataSource()))
-        .setUser4("Select")
-        .setUser5(COMMA_JOIN.join(query.getIntervals()))
-        .setUser6(String.valueOf(query.hasFilters()))
-        .setUser9(Minutes.minutes(numMinutes).toString());
+    return DruidMetrics.makePartialQueryTimeMetric(query);
   }
 
   @Override
@@ -157,16 +148,16 @@ public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResul
         final byte[] filterBytes = dimFilter == null ? new byte[]{} : dimFilter.getCacheKey();
         final byte[] granularityBytes = query.getGranularity().cacheKey();
 
-        final Set<String> dimensions = Sets.newTreeSet();
-        if (query.getDimensions() != null) {
-          dimensions.addAll(query.getDimensions());
+        List<DimensionSpec> dimensionSpecs = query.getDimensions();
+        if (dimensionSpecs == null) {
+          dimensionSpecs = Collections.emptyList();
         }
 
-        final byte[][] dimensionsBytes = new byte[dimensions.size()][];
+        final byte[][] dimensionsBytes = new byte[dimensionSpecs.size()][];
         int dimensionsBytesSize = 0;
         int index = 0;
-        for (String dimension : dimensions) {
-          dimensionsBytes[index] = dimension.getBytes();
+        for (DimensionSpec dimension : dimensionSpecs) {
+          dimensionsBytes[index] = dimension.getCacheKey();
           dimensionsBytesSize += dimensionsBytes[index].length;
           ++index;
         }
@@ -180,7 +171,7 @@ public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResul
         int metricBytesSize = 0;
         index = 0;
         for (String metric : metrics) {
-          metricBytes[index] = metric.getBytes();
+          metricBytes[index] = StringUtils.toUtf8(metric);
           metricBytesSize += metricBytes[index].length;
           ++index;
         }
@@ -253,24 +244,18 @@ public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResul
                 new SelectResultValue(
                     (Map<String, Integer>) jsonMapper.convertValue(
                         resultIter.next(), new TypeReference<Map<String, Integer>>()
-                    {
-                    }
+                        {
+                        }
                     ),
                     (List<EventHolder>) jsonMapper.convertValue(
                         resultIter.next(), new TypeReference<List<EventHolder>>()
-                    {
-                    }
+                        {
+                        }
                     )
                 )
             );
           }
         };
-      }
-
-      @Override
-      public Sequence<Result<SelectResultValue>> mergeSequences(Sequence<Sequence<Result<SelectResultValue>>> seqOfSequences)
-      {
-        return new MergeSequence<Result<SelectResultValue>>(getOrdering(), seqOfSequences);
       }
     };
   }
@@ -278,15 +263,65 @@ public class SelectQueryQueryToolChest extends QueryToolChest<Result<SelectResul
   @Override
   public QueryRunner<Result<SelectResultValue>> preMergeQueryDecoration(QueryRunner<Result<SelectResultValue>> runner)
   {
-    return new IntervalChunkingQueryRunner<Result<SelectResultValue>>(
-        runner,
-        config.getChunkPeriod()
-
-    );
+    return intervalChunkingQueryRunnerDecorator.decorate(runner, this);
   }
 
-  public Ordering<Result<SelectResultValue>> getOrdering()
+  @Override
+  public <T extends LogicalSegment> List<T> filterSegments(SelectQuery query, List<T> segments)
   {
-    return Ordering.natural();
+    PagingSpec pagingSpec = query.getPagingSpec();
+    Map<String, Integer> paging = pagingSpec.getPagingIdentifiers();
+    if (paging == null || paging.isEmpty()) {
+      return segments;
+    }
+
+    final QueryGranularity granularity = query.getGranularity();
+
+    List<Interval> intervals = Lists.newArrayList(
+        Iterables.transform(paging.keySet(), SegmentDesc.INTERVAL_EXTRACTOR)
+    );
+    Collections.sort(
+        intervals, query.isDescending() ? Comparators.intervalsByEndThenStart()
+                                        : Comparators.intervalsByStartThenEnd()
+    );
+
+    TreeMap<Long, Long> granularThresholds = Maps.newTreeMap();
+    for (Interval interval : intervals) {
+      if (query.isDescending()) {
+        long granularEnd = granularity.truncate(interval.getEndMillis());
+        Long currentEnd = granularThresholds.get(granularEnd);
+        if (currentEnd == null || interval.getEndMillis() > currentEnd) {
+          granularThresholds.put(granularEnd, interval.getEndMillis());
+        }
+      } else {
+        long granularStart = granularity.truncate(interval.getStartMillis());
+        Long currentStart = granularThresholds.get(granularStart);
+        if (currentStart == null || interval.getStartMillis() < currentStart) {
+          granularThresholds.put(granularStart, interval.getStartMillis());
+        }
+      }
+    }
+
+    List<T> queryIntervals = Lists.newArrayList(segments);
+
+    Iterator<T> it = queryIntervals.iterator();
+    if (query.isDescending()) {
+      while (it.hasNext()) {
+        Interval interval = it.next().getInterval();
+        Map.Entry<Long, Long> ceiling = granularThresholds.ceilingEntry(granularity.truncate(interval.getEndMillis()));
+        if (ceiling == null || interval.getStartMillis() >= ceiling.getValue()) {
+          it.remove();
+        }
+      }
+    } else {
+      while (it.hasNext()) {
+        Interval interval = it.next().getInterval();
+        Map.Entry<Long, Long> floor = granularThresholds.floorEntry(granularity.truncate(interval.getStartMillis()));
+        if (floor == null || interval.getEndMillis() <= floor.getValue()) {
+          it.remove();
+        }
+      }
+    }
+    return queryIntervals;
   }
 }

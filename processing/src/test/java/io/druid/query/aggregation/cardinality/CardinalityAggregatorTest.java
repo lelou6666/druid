@@ -1,37 +1,42 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013, 2014  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.aggregation.cardinality;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import io.druid.jackson.DefaultObjectMapper;
 import io.druid.query.aggregation.Aggregator;
+import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.BufferAggregator;
 import io.druid.segment.DimensionSelector;
 import io.druid.segment.data.IndexedInts;
-import junit.framework.Assert;
+import org.junit.Assert;
 import org.junit.Test;
 
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
 import java.util.List;
@@ -122,6 +127,18 @@ public class CardinalityAggregatorTest
         public Iterator<Integer> iterator()
         {
           return Iterators.forArray(column.get(p));
+        }
+
+        @Override
+        public void fill(int index, int[] toFill)
+        {
+          throw new UnsupportedOperationException("fill not supported");
+        }
+
+        @Override
+        public void close() throws IOException
+        {
+
         }
       };
     }
@@ -376,6 +393,17 @@ public class CardinalityAggregatorTest
             )
         ),
         0.05
+    );
+  }
+
+  @Test
+  public void testSerde() throws Exception
+  {
+    CardinalityAggregatorFactory factory = new CardinalityAggregatorFactory("billy", ImmutableList.of("b", "a", "c"), true);
+    ObjectMapper objectMapper = new DefaultObjectMapper();
+    Assert.assertEquals(
+        factory,
+        objectMapper.readValue(objectMapper.writeValueAsString(factory), AggregatorFactory.class)
     );
   }
 }

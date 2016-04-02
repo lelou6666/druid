@@ -1,27 +1,27 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment;
 
 import com.google.common.base.Supplier;
 import com.metamx.common.logger.Logger;
-import com.ning.compress.lzf.ChunkEncoder;
+import com.ning.compress.BufferRecycler;
 import io.druid.collections.ResourceHolder;
 import io.druid.collections.StupidPool;
 
@@ -35,23 +35,24 @@ public class CompressedPools
 {
   private static final Logger log = new Logger(CompressedPools.class);
 
-  private static final StupidPool<ChunkEncoder> chunkEncoderPool = new StupidPool<ChunkEncoder>(
-      new Supplier<ChunkEncoder>()
+  public static final int BUFFER_SIZE = 0x10000;
+  private static final StupidPool<BufferRecycler> bufferRecyclerPool = new StupidPool<BufferRecycler>(
+      new Supplier<BufferRecycler>()
       {
         private final AtomicLong counter = new AtomicLong(0);
 
         @Override
-        public ChunkEncoder get()
+        public BufferRecycler get()
         {
-          log.info("Allocating new chunkEncoder[%,d]", counter.incrementAndGet());
-          return new ChunkEncoder(0xFFFF);
+          log.info("Allocating new bufferRecycler[%,d]", counter.incrementAndGet());
+          return new BufferRecycler();
         }
       }
   );
 
-  public static ResourceHolder<ChunkEncoder> getChunkEncoder()
+  public static ResourceHolder<BufferRecycler> getBufferRecycler()
   {
-    return chunkEncoderPool.take();
+    return bufferRecyclerPool.take();
   }
 
   private static final StupidPool<byte[]> outputBytesPool = new StupidPool<byte[]>(
@@ -63,7 +64,7 @@ public class CompressedPools
         public byte[] get()
         {
           log.info("Allocating new outputBytesPool[%,d]", counter.incrementAndGet());
-          return new byte[0xFFFF];
+          return new byte[BUFFER_SIZE];
         }
       }
   );
@@ -82,7 +83,7 @@ public class CompressedPools
         public ByteBuffer get()
         {
           log.info("Allocating new bigEndByteBuf[%,d]", counter.incrementAndGet());
-          return ByteBuffer.allocateDirect(0xFFFF).order(ByteOrder.BIG_ENDIAN);
+          return ByteBuffer.allocateDirect(BUFFER_SIZE).order(ByteOrder.BIG_ENDIAN);
         }
       }
   );
@@ -96,7 +97,7 @@ public class CompressedPools
         public ByteBuffer get()
         {
           log.info("Allocating new littleEndByteBuf[%,d]", counter.incrementAndGet());
-          return ByteBuffer.allocateDirect(0xFFFF).order(ByteOrder.LITTLE_ENDIAN);
+          return ByteBuffer.allocateDirect(BUFFER_SIZE).order(ByteOrder.LITTLE_ENDIAN);
         }
       }
   );

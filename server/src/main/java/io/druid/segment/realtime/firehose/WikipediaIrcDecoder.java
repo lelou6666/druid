@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.realtime.firehose;
@@ -29,6 +29,7 @@ import com.maxmind.geoip2.exception.GeoIp2Exception;
 import com.maxmind.geoip2.model.Omni;
 import com.metamx.common.logger.Logger;
 import io.druid.data.input.InputRow;
+import io.druid.data.input.Row;
 import org.apache.commons.io.FileUtils;
 import org.joda.time.DateTime;
 
@@ -75,45 +76,84 @@ class WikipediaIrcDecoder implements IrcDecoder
   final Map<String, Map<String, String>> namespaces;
   final String geoIpDatabase;
 
-  public WikipediaIrcDecoder( Map<String, Map<String, String>> namespaces) {
+  public WikipediaIrcDecoder(Map<String, Map<String, String>> namespaces)
+  {
     this(namespaces, null);
   }
 
   @JsonCreator
-  public WikipediaIrcDecoder(@JsonProperty("namespaces") Map<String, Map<String, String>> namespaces,
-                             @JsonProperty("geoIpDatabase") String geoIpDatabase)
+  public WikipediaIrcDecoder(
+      @JsonProperty("namespaces") Map<String, Map<String, String>> namespaces,
+      @JsonProperty("geoIpDatabase") String geoIpDatabase
+  )
   {
-    if(namespaces == null) {
+    if (namespaces == null) {
       namespaces = Maps.newHashMap();
     }
     this.namespaces = namespaces;
     this.geoIpDatabase = geoIpDatabase;
 
-    File geoDb;
-    if(geoIpDatabase != null) {
-      geoDb = new File(geoIpDatabase);
+    if (geoIpDatabase != null) {
+      this.geoLookup = openGeoIpDb(new File(geoIpDatabase));
     } else {
-      try {
-        String tmpDir = System.getProperty("java.io.tmpdir");
-        geoDb = new File(tmpDir, this.getClass().getCanonicalName() + ".GeoLite2-City.mmdb");
-        if(!geoDb.exists()) {
-          log.info("Downloading geo ip database to [%s]", geoDb);
+      this.geoLookup = openDefaultGeoIpDb();
+    }
+  }
 
-          FileUtils.copyInputStreamToFile(
-              new GZIPInputStream(
-                  new URL("http://geolite.maxmind.com/download/geoip/database/GeoLite2-City.mmdb.gz").openStream()
-              ),
-              geoDb
-          );
-        }
-      } catch(IOException e) {
-        throw new RuntimeException("Unable to download geo ip database [%s]", e);
+  private DatabaseReader openDefaultGeoIpDb() {
+    File geoDb = new File(System.getProperty("java.io.tmpdir"),
+                          this.getClass().getCanonicalName() + ".GeoLite2-City.mmdb");
+    try {
+      return openDefaultGeoIpDb(geoDb);
+    }
+    catch (RuntimeException e) {
+      log.warn(e.getMessage()+" Attempting to re-download.", e);
+      if (geoDb.exists() && !geoDb.delete()) {
+        throw new RuntimeException("Could not delete geo db file ["+ geoDb.getAbsolutePath() +"].");
+      }
+      // local download may be corrupt, will retry once.
+      return openDefaultGeoIpDb(geoDb);
+    }
+  }
+
+  private DatabaseReader openDefaultGeoIpDb(File geoDb) {
+    downloadGeoLiteDbToFile(geoDb);
+    return openGeoIpDb(geoDb);
+  }
+
+  private DatabaseReader openGeoIpDb(File geoDb) {
+    try {
+      DatabaseReader reader = new DatabaseReader(geoDb);
+      log.info("Using geo ip database at [%s].", geoDb);
+      return reader;
+    } catch (IOException e) {
+      throw new RuntimeException("Could not open geo db at ["+ geoDb.getAbsolutePath() +"].", e);
+    }
+  }
+
+  private void downloadGeoLiteDbToFile(File geoDb) {
+    if (geoDb.exists()) {
+      return;
+    }
+
+    try {
+      log.info("Downloading geo ip database to [%s]. This may take a few minutes.", geoDb.getAbsolutePath());
+
+      File tmpFile = File.createTempFile("druid", "geo");
+
+      FileUtils.copyInputStreamToFile(
+        new GZIPInputStream(
+          new URL("http://geolite.maxmind.com/download/geoip/database/GeoLite2-City.mmdb.gz").openStream()
+        ),
+        tmpFile
+      );
+
+      if (!tmpFile.renameTo(geoDb)) {
+        throw new RuntimeException("Unable to move geo file to ["+geoDb.getAbsolutePath()+"]!");
       }
     }
-    try {
-      geoLookup = new DatabaseReader(geoDb);
-    } catch(IOException e) {
-      throw new RuntimeException("Unable to open geo ip lookup database", e);
+    catch (IOException e) {
+      throw new RuntimeException("Unable to download geo ip database.", e);
     }
   }
 
@@ -136,12 +176,12 @@ class WikipediaIrcDecoder implements IrcDecoder
     final Map<String, Float> metrics = Maps.newHashMap();
 
     Matcher m = pattern.matcher(msg);
-    if(!m.matches()) {
+    if (!m.matches()) {
       throw new IllegalArgumentException("Invalid input format");
     }
 
     Matcher shortname = shortnamePattern.matcher(channel);
-    if(shortname.matches()) {
+    if (shortname.matches()) {
       dimensions.put("language", shortname.group(1));
     }
 
@@ -153,7 +193,7 @@ class WikipediaIrcDecoder implements IrcDecoder
     String user = m.group(4);
     Matcher ipMatch = ipPattern.matcher(user);
     boolean anonymous = ipMatch.matches();
-    if(anonymous) {
+    if (anonymous) {
       try {
         final InetAddress ip = InetAddress.getByName(ipMatch.group());
         final Omni lookup = geoLookup.omni(ip);
@@ -162,11 +202,14 @@ class WikipediaIrcDecoder implements IrcDecoder
         dimensions.put("country", lookup.getCountry().getName());
         dimensions.put("region", lookup.getMostSpecificSubdivision().getName());
         dimensions.put("city", lookup.getCity().getName());
-      } catch(UnknownHostException e) {
+      }
+      catch (UnknownHostException e) {
         log.error(e, "invalid ip [%s]", ipMatch.group());
-      } catch(IOException e) {
+      }
+      catch (IOException e) {
         log.error(e, "error looking up geo ip");
-      } catch(GeoIp2Exception e) {
+      }
+      catch (GeoIp2Exception e) {
         log.error(e, "error looking up geo ip");
       }
     }
@@ -180,15 +223,14 @@ class WikipediaIrcDecoder implements IrcDecoder
     dimensions.put("anonymous", Boolean.toString(anonymous));
 
     String[] parts = page.split(":");
-    if(parts.length > 1 && !parts[1].startsWith(" ")) {
+    if (parts.length > 1 && !parts[1].startsWith(" ")) {
       Map<String, String> channelNamespaces = namespaces.get(channel);
-      if(channelNamespaces != null && channelNamespaces.containsKey(parts[0])) {
+      if (channelNamespaces != null && channelNamespaces.containsKey(parts[0])) {
         dimensions.put("namespace", channelNamespaces.get(parts[0]));
       } else {
         dimensions.put("namespace", "wikipedia");
       }
-    }
-    else {
+    } else {
       dimensions.put("namespace", "article");
     }
 
@@ -212,10 +254,16 @@ class WikipediaIrcDecoder implements IrcDecoder
       }
 
       @Override
+      public DateTime getTimestamp()
+      {
+        return timestamp;
+      }
+
+      @Override
       public List<String> getDimension(String dimension)
       {
         final String value = dimensions.get(dimension);
-        if(value != null) {
+        if (value != null) {
           return ImmutableList.of(value);
         } else {
           return ImmutableList.of();
@@ -223,7 +271,8 @@ class WikipediaIrcDecoder implements IrcDecoder
       }
 
       @Override
-      public Object getRaw(String dimension) {
+      public Object getRaw(String dimension)
+      {
         return dimensions.get(dimension);
       }
 
@@ -232,6 +281,18 @@ class WikipediaIrcDecoder implements IrcDecoder
       public float getFloatMetric(String metric)
       {
         return metrics.get(metric);
+      }
+
+      @Override
+      public long getLongMetric(String metric)
+      {
+        return new Float(metrics.get(metric)).longValue();
+      }
+
+      @Override
+      public int compareTo(Row o)
+      {
+        return timestamp.compareTo(o.getTimestamp());
       }
 
       @Override

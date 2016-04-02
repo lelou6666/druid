@@ -1,26 +1,26 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.topn;
 
-import com.google.common.io.Closeables;
 import com.metamx.common.Pair;
+import com.metamx.common.guava.CloseQuietly;
 import io.druid.collections.ResourceHolder;
 import io.druid.collections.StupidPool;
 import io.druid.query.aggregation.BufferAggregator;
@@ -31,6 +31,7 @@ import io.druid.segment.data.IndexedInts;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  */
@@ -40,6 +41,7 @@ public class PooledTopNAlgorithm
   private final Capabilities capabilities;
   private final TopNQuery query;
   private final StupidPool<ByteBuffer> bufferPool;
+  private static final int AGG_UNROLL_COUNT = 8; // Must be able to fit loop below
 
   public PooledTopNAlgorithm(
       Capabilities capabilities,
@@ -125,6 +127,21 @@ public class PooledTopNAlgorithm
     return query.getTopNMetricSpec().configureOptimizer(arrayProvider).build();
   }
 
+  @Override
+  protected int computeNewLength(int[] dimValSelector, int numProcessed, int numToProcess)
+  {
+    int valid = 0;
+    int length = 0;
+    for (int i = numProcessed; i < dimValSelector.length && valid < numToProcess; i++) {
+      length++;
+      if (SKIP_POSITION_VALUE != dimValSelector[i]) {
+        valid++;
+      }
+    }
+    return length;
+  }
+
+  @Override
   protected int[] updateDimValSelector(int[] dimValSelector, int numProcessed, int numToProcess)
   {
     final int[] retVal = Arrays.copyOf(dimValSelector, dimValSelector.length);
@@ -143,13 +160,30 @@ public class PooledTopNAlgorithm
   {
     return makeBufferAggregators(params.getCursor(), query.getAggregatorSpecs());
   }
-
+  /**
+   * Use aggressive loop unrolling to aggregate the data
+   *
+   * How this works: The aggregates are evaluated AGG_UNROLL_COUNT at a time. This was chosen to be 8 rather arbitrarily.
+   * The offsets into the output buffer are precalculated and stored in aggregatorOffsets
+   *
+   * For queries whose aggregate count is less than AGG_UNROLL_COUNT, the aggregates evaluted in a switch statement.
+   * See http://en.wikipedia.org/wiki/Duff's_device for more information on this kind of approach
+   *
+   * This allows out of order execution of the code. In local tests, the JVM inlines all the way to this function.
+   *
+   * If there are more than AGG_UNROLL_COUNT aggregates, then the remainder is calculated with the switch, and the
+   * blocks of AGG_UNROLL_COUNT are calculated in a partially unrolled for-loop.
+   *
+   * Putting the switch first allows for optimization for the common case (less than AGG_UNROLL_COUNT aggs) but
+   * still optimizes the high quantity of aggregate queries which benefit greatly from any speed improvements
+   * (they simply take longer to start with).
+   */
   @Override
   protected void scanAndAggregate(
-      PooledTopNParams params,
-      int[] positions,
-      BufferAggregator[] theAggregators,
-      int numProcessed
+      final PooledTopNParams params,
+      final int[] positions,
+      final BufferAggregator[] theAggregators,
+      final int numProcessed
   )
   {
     final ByteBuffer resultsBuf = params.getResultsBuf();
@@ -158,32 +192,266 @@ public class PooledTopNAlgorithm
     final Cursor cursor = params.getCursor();
     final DimensionSelector dimSelector = params.getDimSelector();
 
+    final int[] aggregatorOffsets = new int[aggregatorSizes.length];
+    for (int j = 0, offset = 0; j < aggregatorSizes.length; ++j) {
+      aggregatorOffsets[j] = offset;
+      offset += aggregatorSizes[j];
+    }
+
+    final int aggSize = theAggregators.length;
+    final int aggExtra = aggSize % AGG_UNROLL_COUNT;
+    final AtomicInteger currentPosition = new AtomicInteger(0);
+
     while (!cursor.isDone()) {
       final IndexedInts dimValues = dimSelector.getRow();
 
-      for (int i = 0; i < dimValues.size(); ++i) {
-        final int dimIndex = dimValues.get(i);
-        int position = positions[dimIndex];
-        switch (position) {
-          case SKIP_POSITION_VALUE:
-            break;
-          case INIT_POSITION_VALUE:
-            positions[dimIndex] = (dimIndex - numProcessed) * numBytesPerRecord;
-            position = positions[dimIndex];
-            for (int j = 0; j < theAggregators.length; ++j) {
-              theAggregators[j].init(resultsBuf, position);
-              position += aggregatorSizes[j];
-            }
-            position = positions[dimIndex];
-          default:
-            for (int j = 0; j < theAggregators.length; ++j) {
-              theAggregators[j].aggregate(resultsBuf, position);
-              position += aggregatorSizes[j];
-            }
-        }
+      final int dimSize = dimValues.size();
+      final int dimExtra = dimSize % AGG_UNROLL_COUNT;
+      switch(dimExtra){
+        case 7:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(6),
+              currentPosition
+          );
+        case 6:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(5),
+              currentPosition
+          );
+        case 5:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(4),
+              currentPosition
+          );
+        case 4:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(3),
+              currentPosition
+          );
+        case 3:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(2),
+              currentPosition
+          );
+        case 2:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(1),
+              currentPosition
+          );
+        case 1:
+          aggregateDimValue(
+              positions,
+              theAggregators,
+              numProcessed,
+              resultsBuf,
+              numBytesPerRecord,
+              aggregatorOffsets,
+              aggSize,
+              aggExtra,
+              dimValues.get(0),
+              currentPosition
+          );
       }
-
+      for (int i = dimExtra; i < dimSize; i += AGG_UNROLL_COUNT) {
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 1),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 2),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 3),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 4),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 5),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 6),
+            currentPosition
+        );
+        aggregateDimValue(
+            positions,
+            theAggregators,
+            numProcessed,
+            resultsBuf,
+            numBytesPerRecord,
+            aggregatorOffsets,
+            aggSize,
+            aggExtra,
+            dimValues.get(i + 7),
+            currentPosition
+        );
+      }
       cursor.advance();
+    }
+  }
+
+  private static void aggregateDimValue(
+      final int[] positions,
+      final BufferAggregator[] theAggregators,
+      final int numProcessed,
+      final ByteBuffer resultsBuf,
+      final int numBytesPerRecord,
+      final int[] aggregatorOffsets,
+      final int aggSize,
+      final int aggExtra,
+      final int dimIndex,
+      final AtomicInteger currentPosition
+  )
+  {
+    if (SKIP_POSITION_VALUE == positions[dimIndex]) {
+      return;
+    }
+    if (INIT_POSITION_VALUE == positions[dimIndex]) {
+      positions[dimIndex] = currentPosition.getAndIncrement() * numBytesPerRecord;
+      final int pos = positions[dimIndex];
+      for (int j = 0; j < aggSize; ++j) {
+        theAggregators[j].init(resultsBuf, pos + aggregatorOffsets[j]);
+      }
+    }
+    final int position = positions[dimIndex];
+
+    switch(aggExtra) {
+      case 7:
+        theAggregators[6].aggregate(resultsBuf, position + aggregatorOffsets[6]);
+      case 6:
+        theAggregators[5].aggregate(resultsBuf, position + aggregatorOffsets[5]);
+      case 5:
+        theAggregators[4].aggregate(resultsBuf, position + aggregatorOffsets[4]);
+      case 4:
+        theAggregators[3].aggregate(resultsBuf, position + aggregatorOffsets[3]);
+      case 3:
+        theAggregators[2].aggregate(resultsBuf, position + aggregatorOffsets[2]);
+      case 2:
+        theAggregators[1].aggregate(resultsBuf, position + aggregatorOffsets[1]);
+      case 1:
+        theAggregators[0].aggregate(resultsBuf, position + aggregatorOffsets[0]);
+    }
+    for (int j = aggExtra; j < aggSize; j += AGG_UNROLL_COUNT) {
+      theAggregators[j].aggregate(resultsBuf, position + aggregatorOffsets[j]);
+      theAggregators[j+1].aggregate(resultsBuf, position + aggregatorOffsets[j+1]);
+      theAggregators[j+2].aggregate(resultsBuf, position + aggregatorOffsets[j+2]);
+      theAggregators[j+3].aggregate(resultsBuf, position + aggregatorOffsets[j+3]);
+      theAggregators[j+4].aggregate(resultsBuf, position + aggregatorOffsets[j+4]);
+      theAggregators[j+5].aggregate(resultsBuf, position + aggregatorOffsets[j+5]);
+      theAggregators[j+6].aggregate(resultsBuf, position + aggregatorOffsets[j+6]);
+      theAggregators[j+7].aggregate(resultsBuf, position + aggregatorOffsets[j+7]);
     }
   }
 
@@ -228,12 +496,14 @@ public class PooledTopNAlgorithm
   @Override
   public void cleanup(PooledTopNParams params)
   {
-    ResourceHolder<ByteBuffer> resultsBufHolder = params.getResultsBufHolder();
+    if (params != null) {
+      ResourceHolder<ByteBuffer> resultsBufHolder = params.getResultsBufHolder();
 
-    if (resultsBufHolder != null) {
-      resultsBufHolder.get().clear();
+      if (resultsBufHolder != null) {
+        resultsBufHolder.get().clear();
+      }
+      CloseQuietly.close(resultsBufHolder);
     }
-    Closeables.closeQuietly(resultsBufHolder);
   }
 
   public static class PooledTopNParams extends TopNParams

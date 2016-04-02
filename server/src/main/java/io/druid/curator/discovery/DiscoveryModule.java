@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.curator.discovery;
@@ -36,11 +36,20 @@ import io.druid.guice.JsonConfigProvider;
 import io.druid.guice.KeyHolder;
 import io.druid.guice.LazySingleton;
 import io.druid.guice.LifecycleModule;
-import io.druid.guice.annotations.Self;
 import io.druid.server.DruidNode;
 import io.druid.server.initialization.CuratorDiscoveryConfig;
 import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.x.discovery.*;
+import org.apache.curator.utils.CloseableExecutorService;
+import org.apache.curator.x.discovery.DownInstancePolicy;
+import org.apache.curator.x.discovery.InstanceFilter;
+import org.apache.curator.x.discovery.ProviderStrategy;
+import org.apache.curator.x.discovery.ServiceCache;
+import org.apache.curator.x.discovery.ServiceCacheBuilder;
+import org.apache.curator.x.discovery.ServiceDiscovery;
+import org.apache.curator.x.discovery.ServiceDiscoveryBuilder;
+import org.apache.curator.x.discovery.ServiceInstance;
+import org.apache.curator.x.discovery.ServiceProvider;
+import org.apache.curator.x.discovery.ServiceProviderBuilder;
 import org.apache.curator.x.discovery.details.ServiceCacheListener;
 
 import java.io.IOException;
@@ -49,12 +58,13 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadFactory;
 
 /**
  * The DiscoveryModule allows for the registration of Keys of DruidNode objects, which it intends to be
  * automatically announced at the end of the lifecycle start.
- * <p/>
+ * 
  * In order for this to work a ServiceAnnouncer instance *must* be injected and instantiated first.
  * This can often be achieved by registering ServiceAnnouncer.class with the LifecycleModule.
  */
@@ -64,10 +74,12 @@ public class DiscoveryModule implements Module
 
   /**
    * Requests that the un-annotated DruidNode instance be injected and published as part of the lifecycle.
-   * <p/>
+   * 
    * That is, this module will announce the DruidNode instance returned by
    * injector.getInstance(Key.get(DruidNode.class)) automatically.
    * Announcement will happen in the LAST stage of the Lifecycle
+   *
+   * @param binder the Binder to register with
    */
   public static void registerDefault(Binder binder)
   {
@@ -76,7 +88,7 @@ public class DiscoveryModule implements Module
 
   /**
    * Requests that the annotated DruidNode instance be injected and published as part of the lifecycle.
-   * <p/>
+   * 
    * That is, this module will announce the DruidNode instance returned by
    * injector.getInstance(Key.get(DruidNode.class, annotation)) automatically.
    * Announcement will happen in the LAST stage of the Lifecycle
@@ -90,11 +102,12 @@ public class DiscoveryModule implements Module
 
   /**
    * Requests that the annotated DruidNode instance be injected and published as part of the lifecycle.
-   * <p/>
+   * 
    * That is, this module will announce the DruidNode instance returned by
    * injector.getInstance(Key.get(DruidNode.class, annotation)) automatically.
    * Announcement will happen in the LAST stage of the Lifecycle
    *
+   * @param binder the Binder to register with
    * @param annotation The annotation class to use in finding the DruidNode instance
    */
   public static void register(Binder binder, Class<? extends Annotation> annotation)
@@ -104,11 +117,12 @@ public class DiscoveryModule implements Module
 
   /**
    * Requests that the keyed DruidNode instance be injected and published as part of the lifecycle.
-   * <p/>
+   * 
    * That is, this module will announce the DruidNode instance returned by
    * injector.getInstance(Key.get(DruidNode.class, annotation)) automatically.
    * Announcement will happen in the LAST stage of the Lifecycle
    *
+   * @param binder the Binder to register with
    * @param key The key to use in finding the DruidNode instance
    */
   public static void registerKey(Binder binder, Key<DruidNode> key)
@@ -313,6 +327,18 @@ public class DiscoveryModule implements Module
       return this;
     }
 
+    @Override
+    public ServiceCacheBuilder<T> executorService(ExecutorService executorService)
+    {
+      return this;
+    }
+
+    @Override
+    public ServiceCacheBuilder<T> executorService(CloseableExecutorService closeableExecutorService)
+    {
+      return this;
+    }
+
     private static class NoopServiceCache<T> implements ServiceCache<T>
     {
       @Override
@@ -402,6 +428,12 @@ public class DiscoveryModule implements Module
 
     @Override
     public ServiceInstance<T> getInstance() throws Exception
+    {
+      return null;
+    }
+
+    @Override
+    public Collection<ServiceInstance<T>> getAllInstances() throws Exception
     {
       return null;
     }

@@ -1,53 +1,59 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment;
 
-import com.google.common.io.Closeables;
+import com.google.common.base.Strings;
+import com.metamx.collections.bitmap.BitmapFactory;
+import com.metamx.collections.bitmap.ImmutableBitmap;
 import com.metamx.collections.spatial.ImmutableRTree;
+import com.metamx.common.guava.CloseQuietly;
 import io.druid.query.filter.BitmapIndexSelector;
+import io.druid.segment.column.BitmapIndex;
 import io.druid.segment.column.Column;
 import io.druid.segment.column.DictionaryEncodedColumn;
 import io.druid.segment.column.GenericColumn;
 import io.druid.segment.data.Indexed;
 import io.druid.segment.data.IndexedIterable;
-import it.uniroma3.mat.extendedset.intset.ImmutableConciseSet;
 
 import java.util.Iterator;
 
 /**
-*/
+ */
 public class ColumnSelectorBitmapIndexSelector implements BitmapIndexSelector
 {
+  private final BitmapFactory bitmapFactory;
   private final ColumnSelector index;
 
   public ColumnSelectorBitmapIndexSelector(
+      final BitmapFactory bitmapFactory,
       final ColumnSelector index
   )
   {
+    this.bitmapFactory = bitmapFactory;
     this.index = index;
   }
 
   @Override
   public Indexed<String> getDimensionValues(String dimension)
   {
-    final Column columnDesc = index.getColumn(dimension.toLowerCase());
+    final Column columnDesc = index.getColumn(dimension);
     if (columnDesc == null || !columnDesc.getCapabilities().isDictionaryEncoded()) {
       return null;
     }
@@ -91,48 +97,55 @@ public class ColumnSelectorBitmapIndexSelector implements BitmapIndexSelector
   {
     GenericColumn column = null;
     try {
-      column = index.getTimeColumn().getGenericColumn();
+      column = index.getColumn(Column.TIME_COLUMN_NAME).getGenericColumn();
       return column.length();
     }
     finally {
-      Closeables.closeQuietly(column);
+      CloseQuietly.close(column);
     }
   }
 
   @Override
-  public ImmutableConciseSet getConciseInvertedIndex(String dimension, String value)
+  public BitmapFactory getBitmapFactory()
   {
-    final Column column = index.getColumn(dimension.toLowerCase());
-    if (column == null) {
-      return new ImmutableConciseSet();
-    }
-    if (!column.getCapabilities().hasBitmapIndexes()) {
-      return new ImmutableConciseSet();
-    }
-
-    return column.getBitmapIndex().getConciseSet(value);
+    return bitmapFactory;
   }
 
   @Override
-  public ImmutableConciseSet getConciseInvertedIndex(String dimension, int idx)
+  public BitmapIndex getBitmapIndex(String dimension)
   {
-    final Column column = index.getColumn(dimension.toLowerCase());
-    if (column == null) {
-      return new ImmutableConciseSet();
+    final Column column = index.getColumn(dimension);
+    if (column != null && column.getCapabilities().hasBitmapIndexes()) {
+      return column.getBitmapIndex();
+    } else {
+      return null;
     }
-    if (!column.getCapabilities().hasBitmapIndexes()) {
-      return new ImmutableConciseSet();
-    }
-    // This is a workaround given the current state of indexing, I feel shame
-    final int index1 = column.getBitmapIndex().hasNulls() ? idx + 1 : idx;
+  }
 
-    return column.getBitmapIndex().getConciseSet(index1);
+  @Override
+  public ImmutableBitmap getBitmapIndex(String dimension, String value)
+  {
+    final Column column = index.getColumn(dimension);
+    if (column == null) {
+      if (Strings.isNullOrEmpty(value)) {
+        return bitmapFactory.complement(bitmapFactory.makeEmptyImmutableBitmap(), getNumRows());
+      } else {
+        return bitmapFactory.makeEmptyImmutableBitmap();
+      }
+    }
+
+    if (!column.getCapabilities().hasBitmapIndexes()) {
+      return bitmapFactory.makeEmptyImmutableBitmap();
+    }
+
+    final BitmapIndex bitmapIndex = column.getBitmapIndex();
+    return bitmapIndex.getBitmap(bitmapIndex.getIndex(value));
   }
 
   @Override
   public ImmutableRTree getSpatialIndex(String dimension)
   {
-    final Column column = index.getColumn(dimension.toLowerCase());
+    final Column column = index.getColumn(dimension);
     if (column == null || !column.getCapabilities().hasSpatialIndexes()) {
       return new ImmutableRTree();
     }

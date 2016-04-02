@@ -1,24 +1,26 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.router;
 
+import com.google.common.base.Function;
+import com.google.common.collect.FluentIterable;
 import com.google.inject.Inject;
 import com.metamx.common.ISE;
 import com.metamx.common.Pair;
@@ -27,17 +29,18 @@ import io.druid.client.selector.Server;
 import io.druid.curator.discovery.ServerDiscoverySelector;
 import io.druid.query.Query;
 
+import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  */
-public class QueryHostFinder<T>
+public class QueryHostFinder
 {
   private static EmittingLogger log = new EmittingLogger(QueryHostFinder.class);
 
   private final TieredBrokerHostSelector hostSelector;
 
-  private final ConcurrentHashMap<String, Server> serverBackup = new ConcurrentHashMap<String, Server>();
+  private final ConcurrentHashMap<String, Server> serverBackup = new ConcurrentHashMap<>();
 
   @Inject
   public QueryHostFinder(
@@ -47,7 +50,7 @@ public class QueryHostFinder<T>
     this.hostSelector = hostSelector;
   }
 
-  public Server findServer(Query<T> query)
+  public <T> Server findServer(Query<T> query)
   {
     final Pair<String, ServerDiscoverySelector> selected = hostSelector.select(query);
     return findServerInner(selected);
@@ -59,7 +62,30 @@ public class QueryHostFinder<T>
     return findServerInner(selected);
   }
 
-  public String getHost(Query<T> query)
+  public Collection<String> getAllHosts()
+  {
+    return FluentIterable
+        .from((Collection<ServerDiscoverySelector>) hostSelector.getAllBrokers().values())
+        .transformAndConcat(
+            new Function<ServerDiscoverySelector, Iterable<Server>>()
+            {
+              @Override
+              public Iterable<Server> apply(ServerDiscoverySelector input)
+              {
+                return input.getAll();
+              }
+            }
+        ).transform(new Function<Server, String>()
+        {
+          @Override
+          public String apply(Server input)
+          {
+            return input.getHost();
+          }
+        }).toList();
+  }
+
+  public <T> String getHost(Query<T> query)
   {
     Server server = findServer(query);
 
@@ -71,9 +97,10 @@ public class QueryHostFinder<T>
       throw new ISE("No server found for query[%s]", query);
     }
 
-    log.debug("Selected [%s]", server.getHost());
+    final String host = server.getHost();
+    log.debug("Selected [%s]", host);
 
-    return server.getHost();
+    return host;
   }
 
   public String getDefaultHost()

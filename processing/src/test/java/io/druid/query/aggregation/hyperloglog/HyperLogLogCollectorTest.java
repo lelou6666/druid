@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.aggregation.hyperloglog;
@@ -90,7 +90,8 @@ public class HyperLogLogCollectorTest
    * with 100 values, requiring  a floating max as described in
    * http://druid.io/blog/2014/02/18/hyperloglog-optimizations-for-real-world-systems.html
    */
-  @Ignore @Test
+  @Ignore
+  @Test
   public void testHighCardinalityRollingFold() throws Exception
   {
     final HyperLogLogCollector rolling = HyperLogLogCollector.makeLatestCollector();
@@ -130,7 +131,8 @@ public class HyperLogLogCollectorTest
     Assert.assertEquals(n, rolling.estimateCardinality(), n * 0.05);
   }
 
-  @Ignore @Test
+  @Ignore
+  @Test
   public void testHighCardinalityRollingFold2() throws Exception
   {
     final HyperLogLogCollector rolling = HyperLogLogCollector.makeLatestCollector();
@@ -482,7 +484,7 @@ public class HyperLogLogCollectorTest
     }
 
     final short numNonZeroInRemaining = computeNumNonZero((byte) remainingBytes);
-    numNonZero += (HyperLogLogCollector.NUM_BYTES_FOR_BUCKETS - initialBytes.length) * numNonZeroInRemaining;
+    numNonZero += (short)((HyperLogLogCollector.NUM_BYTES_FOR_BUCKETS - initialBytes.length) * numNonZeroInRemaining);
 
     ByteBuffer biggerOffset = ByteBuffer.allocate(HyperLogLogCollector.getLatestNumBytesForDenseStorage());
     biggerOffset.put(HLLCV1.VERSION);
@@ -577,7 +579,7 @@ public class HyperLogLogCollectorTest
   @Test
   public void testEstimation() throws Exception
   {
-    Random random = new Random(0l);
+    Random random = new Random(0L);
 
     final int[] valsToCheck = {10, 20, 50, 100, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 1000000, 2000000};
     final double[] expectedVals = {
@@ -603,7 +605,7 @@ public class HyperLogLogCollectorTest
   @Test
   public void testEstimationReadOnlyByteBuffers() throws Exception
   {
-    Random random = new Random(0l);
+    Random random = new Random(0L);
 
     final int[] valsToCheck = {10, 20, 50, 100, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 1000000, 2000000};
     final double[] expectedVals = {
@@ -633,7 +635,7 @@ public class HyperLogLogCollectorTest
   @Test
   public void testEstimationLimitDifferentFromCapacity() throws Exception
   {
-    Random random = new Random(0l);
+    Random random = new Random(0L);
 
     final int[] valsToCheck = {10, 20, 50, 100, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 1000000, 2000000};
     final double[] expectedVals = {
@@ -775,6 +777,45 @@ public class HyperLogLogCollectorTest
   }
 
   @Test
+  public void testCompareToShouldBehaveConsistentlyWithEstimatedCardinalitiesEvenInToughCases() throws Exception {
+    // given
+    Random rand = new Random(0);
+    HyperUniquesAggregatorFactory factory = new HyperUniquesAggregatorFactory("foo", "bar");
+    Comparator comparator = factory.getComparator();
+
+    for (int i = 0; i < 1000; ++i) {
+      // given
+      HyperLogLogCollector leftCollector = HyperLogLogCollector.makeLatestCollector();
+      int j = rand.nextInt(9000) + 5000;
+      for (int l = 0; l < j; ++l) {
+        leftCollector.add(fn.hashLong(rand.nextLong()).asBytes());
+      }
+
+      HyperLogLogCollector rightCollector = HyperLogLogCollector.makeLatestCollector();
+      int k = rand.nextInt(9000) + 5000;
+      for (int l = 0; l < k; ++l) {
+        rightCollector.add(fn.hashLong(rand.nextLong()).asBytes());
+      }
+
+      // when
+      final int orderedByCardinality = Double.compare(leftCollector.estimateCardinality(),
+              rightCollector.estimateCardinality());
+      final int orderedByComparator = comparator.compare(leftCollector, rightCollector);
+
+      // then, assert hyperloglog comparator behaves consistently with estimated cardinalities
+      Assert.assertEquals(
+              String.format("orderedByComparator=%d, orderedByCardinality=%d,\n" +
+                      "Left={cardinality=%f, hll=%s},\n" +
+                      "Right={cardinality=%f, hll=%s},\n", orderedByComparator, orderedByCardinality,
+                      leftCollector.estimateCardinality(), leftCollector,
+                      rightCollector.estimateCardinality(), rightCollector),
+              orderedByCardinality,
+              orderedByComparator
+      );
+    }
+  }
+
+  @Test
   public void testMaxOverflow() {
     HyperLogLogCollector collector = HyperLogLogCollector.makeLatestCollector();
     collector.add((short)23, (byte)16);
@@ -876,7 +917,8 @@ public class HyperLogLogCollectorTest
   }
 
   // Provides a nice printout of error rates as a function of cardinality
-  @Ignore @Test
+  @Ignore
+  @Test
   public void showErrorRate() throws Exception
   {
     HashFunction fn = Hashing.murmur3_128();

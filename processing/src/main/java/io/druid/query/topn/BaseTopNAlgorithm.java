@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.topn;
@@ -77,12 +77,16 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
     final int cardinality = params.getCardinality();
     int numProcessed = 0;
     while (numProcessed < cardinality) {
-      final int numToProcess = Math.min(params.getNumValuesPerPass(), cardinality - numProcessed);
+      final int numToProcess;
+      int maxNumToProcess = Math.min(params.getNumValuesPerPass(), cardinality - numProcessed);
 
       DimValSelector theDimValSelector;
       if (!hasDimValSelector) {
+        numToProcess = maxNumToProcess;
         theDimValSelector = makeDimValSelector(params, numProcessed, numToProcess);
       } else {
+        //skip invalid, calculate length to have enough valid value to process or hit the end.
+        numToProcess = computeNewLength(dimValSelector, numProcessed, maxNumToProcess);
         theDimValSelector = updateDimValSelector(dimValSelector, numProcessed, numToProcess);
       }
 
@@ -100,6 +104,20 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
   }
 
   protected abstract DimValSelector makeDimValSelector(Parameters params, int numProcessed, int numToProcess);
+
+  /**
+   * Skip invalid value, calculate length to have enough valid value to process or hit the end.
+   *
+   * @param dimValSelector  the dim value selector which record value is valid or invalid.
+   * @param numProcessed    the start position to process
+   * @param numToProcess    the number of valid value to process
+   *
+   * @return the length between which have enough valid value to process or hit the end.
+   */
+  protected int computeNewLength(DimValSelector dimValSelector, int numProcessed, int numToProcess)
+  {
+    return numToProcess;
+  }
 
   protected abstract DimValSelector updateDimValSelector(
       DimValSelector dimValSelector,

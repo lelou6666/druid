@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.groupby.orderby;
@@ -27,6 +27,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
+import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 import com.metamx.common.ISE;
 import com.metamx.common.guava.Sequence;
@@ -35,8 +36,10 @@ import io.druid.data.input.Row;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DimensionSpec;
+import io.druid.query.ordering.StringComparators.StringComparator;
 
 import javax.annotation.Nullable;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -46,6 +49,8 @@ import java.util.Map;
  */
 public class DefaultLimitSpec implements LimitSpec
 {
+  private static final byte CACHE_KEY = 0x1;
+
   private final List<OrderByColumnSpec> columns;
   private final int limit;
 
@@ -87,10 +92,15 @@ public class DefaultLimitSpec implements LimitSpec
 
     if (limit == Integer.MAX_VALUE) {
       return new SortingFn(ordering);
-    }
-    else {
+    } else {
       return new TopNFunction(ordering, limit);
     }
+  }
+
+  @Override
+  public LimitSpec merge(LimitSpec other)
+  {
+    return this;
   }
 
   private Ordering<Row> makeComparator(
@@ -106,24 +116,32 @@ public class DefaultLimitSpec implements LimitSpec
       }
     };
 
-    Map<String, Ordering<Row>> possibleOrderings = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+    Map<String, DimensionSpec> dimensionsMap = Maps.newHashMap();
     for (DimensionSpec spec : dimensions) {
-      final String dimension = spec.getOutputName();
-      possibleOrderings.put(dimension, dimensionOrdering(dimension));
+      dimensionsMap.put(spec.getOutputName(), spec);
     }
 
+    Map<String, AggregatorFactory> aggregatorsMap = Maps.newHashMap();
     for (final AggregatorFactory agg : aggs) {
-      final String column = agg.getName();
-      possibleOrderings.put(column, metricOrdering(column, agg.getComparator()));
+      aggregatorsMap.put(agg.getName(), agg);
     }
 
+    Map<String, PostAggregator> postAggregatorsMap = Maps.newHashMap();
     for (PostAggregator postAgg : postAggs) {
-      final String column = postAgg.getName();
-      possibleOrderings.put(column, metricOrdering(column, postAgg.getComparator()));
+      postAggregatorsMap.put(postAgg.getName(), postAgg);
     }
 
     for (OrderByColumnSpec columnSpec : columns) {
-      Ordering<Row> nextOrdering = possibleOrderings.get(columnSpec.getDimension());
+      String columnName = columnSpec.getDimension();
+      Ordering<Row> nextOrdering = null;
+
+      if (postAggregatorsMap.containsKey(columnName)) {
+        nextOrdering = metricOrdering(columnName, postAggregatorsMap.get(columnName).getComparator());
+      } else if (aggregatorsMap.containsKey(columnName)) {
+        nextOrdering = metricOrdering(columnName, aggregatorsMap.get(columnName).getComparator());
+      } else if (dimensionsMap.containsKey(columnName)) {
+        nextOrdering = dimensionOrdering(columnName, columnSpec.getDimensionComparator());
+      }
 
       if (nextOrdering == null) {
         throw new ISE("Unknown column in order clause[%s]", columnSpec);
@@ -153,9 +171,9 @@ public class DefaultLimitSpec implements LimitSpec
     };
   }
 
-  private Ordering<Row> dimensionOrdering(final String dimension)
+  private Ordering<Row> dimensionOrdering(final String dimension, final StringComparator comparator)
   {
-    return Ordering.natural()
+    return Ordering.from(comparator)
                    .nullsFirst()
                    .onResultOf(
                        new Function<Row, String>()
@@ -191,7 +209,7 @@ public class DefaultLimitSpec implements LimitSpec
 
     @Override
     public Sequence<Row> apply(
-        @Nullable Sequence<Row> input
+        Sequence<Row> input
     )
     {
       return Sequences.limit(input, limit);
@@ -200,12 +218,18 @@ public class DefaultLimitSpec implements LimitSpec
     @Override
     public boolean equals(Object o)
     {
-      if (this == o) return true;
-      if (o == null || getClass() != o.getClass()) return false;
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
 
       LimitingFn that = (LimitingFn) o;
 
-      if (limit != that.limit) return false;
+      if (limit != that.limit) {
+        return false;
+      }
 
       return true;
     }
@@ -232,12 +256,18 @@ public class DefaultLimitSpec implements LimitSpec
     @Override
     public boolean equals(Object o)
     {
-      if (this == o) return true;
-      if (o == null || getClass() != o.getClass()) return false;
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
 
       SortingFn sortingFn = (SortingFn) o;
 
-      if (ordering != null ? !ordering.equals(sortingFn.ordering) : sortingFn.ordering != null) return false;
+      if (ordering != null ? !ordering.equals(sortingFn.ordering) : sortingFn.ordering != null) {
+        return false;
+      }
 
       return true;
     }
@@ -258,12 +288,12 @@ public class DefaultLimitSpec implements LimitSpec
     {
       this.limit = limit;
 
-      this.sorter = new TopNSorter<Row>(ordering);
+      this.sorter = new TopNSorter<>(ordering);
     }
 
     @Override
     public Sequence<Row> apply(
-        @Nullable Sequence<Row> input
+        Sequence<Row> input
     )
     {
       final ArrayList<Row> materializedList = Sequences.toList(input, Lists.<Row>newArrayList());
@@ -273,13 +303,21 @@ public class DefaultLimitSpec implements LimitSpec
     @Override
     public boolean equals(Object o)
     {
-      if (this == o) return true;
-      if (o == null || getClass() != o.getClass()) return false;
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
 
       TopNFunction that = (TopNFunction) o;
 
-      if (limit != that.limit) return false;
-      if (sorter != null ? !sorter.equals(that.sorter) : that.sorter != null) return false;
+      if (limit != that.limit) {
+        return false;
+      }
+      if (sorter != null ? !sorter.equals(that.sorter) : that.sorter != null) {
+        return false;
+      }
 
       return true;
     }
@@ -296,13 +334,21 @@ public class DefaultLimitSpec implements LimitSpec
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
 
     DefaultLimitSpec that = (DefaultLimitSpec) o;
 
-    if (limit != that.limit) return false;
-    if (columns != null ? !columns.equals(that.columns) : that.columns != null) return false;
+    if (limit != that.limit) {
+      return false;
+    }
+    if (columns != null ? !columns.equals(that.columns) : that.columns != null) {
+      return false;
+    }
 
     return true;
   }
@@ -313,5 +359,26 @@ public class DefaultLimitSpec implements LimitSpec
     int result = columns != null ? columns.hashCode() : 0;
     result = 31 * result + limit;
     return result;
+  }
+
+  @Override
+  public byte[] getCacheKey()
+  {
+    final byte[][] columnBytes = new byte[columns.size()][];
+    int columnsBytesSize = 0;
+    int index = 0;
+    for (OrderByColumnSpec column : columns) {
+      columnBytes[index] = column.getCacheKey();
+      columnsBytesSize += columnBytes[index].length;
+      ++index;
+    }
+
+    ByteBuffer buffer = ByteBuffer.allocate(1 + columnsBytesSize + 4)
+                                  .put(CACHE_KEY);
+    for (byte[] columnByte : columnBytes) {
+      buffer.put(columnByte);
+    }
+    buffer.put(Ints.toByteArray(limit));
+    return buffer.array();
   }
 }

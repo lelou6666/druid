@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.common.task;
@@ -26,6 +26,8 @@ import io.druid.indexing.common.actions.LockTryAcquireAction;
 import io.druid.indexing.common.actions.TaskActionClient;
 import org.joda.time.Interval;
 
+import java.util.Map;
+
 public abstract class AbstractFixedIntervalTask extends AbstractTask
 {
   @JsonIgnore
@@ -34,20 +36,40 @@ public abstract class AbstractFixedIntervalTask extends AbstractTask
   protected AbstractFixedIntervalTask(
       String id,
       String dataSource,
-      Interval interval
+      Interval interval,
+      Map<String, Object> context
   )
   {
-    this(id, id, new TaskResource(id, 1), dataSource, interval);
+    this(id, id, new TaskResource(id, 1), dataSource, interval, context);
+  }
+
+  protected AbstractFixedIntervalTask(
+      String id,
+      TaskResource taskResource,
+      String dataSource,
+      Interval interval,
+      Map<String, Object> context
+  )
+  {
+    this(
+        id,
+        id,
+        taskResource == null ? new TaskResource(id, 1) : taskResource,
+        dataSource,
+        interval,
+        context
+    );
   }
 
   protected AbstractFixedIntervalTask(
       String id,
       String groupId,
       String dataSource,
-      Interval interval
+      Interval interval,
+      Map<String, Object> context
   )
   {
-    this(id, groupId, new TaskResource(id, 1), dataSource, interval);
+    this(id, groupId, new TaskResource(id, 1), dataSource, interval, context);
   }
 
   protected AbstractFixedIntervalTask(
@@ -55,10 +77,11 @@ public abstract class AbstractFixedIntervalTask extends AbstractTask
       String groupId,
       TaskResource taskResource,
       String dataSource,
-      Interval interval
+      Interval interval,
+      Map<String, Object> context
   )
   {
-    super(id, groupId, taskResource, dataSource);
+    super(id, groupId, taskResource, dataSource, context);
     this.interval = Preconditions.checkNotNull(interval, "interval");
     Preconditions.checkArgument(interval.toDurationMillis() > 0, "interval empty");
   }
@@ -66,7 +89,7 @@ public abstract class AbstractFixedIntervalTask extends AbstractTask
   @Override
   public boolean isReady(TaskActionClient taskActionClient) throws Exception
   {
-    return taskActionClient.submit(new LockTryAcquireAction(interval)).isPresent();
+    return taskActionClient.submit(new LockTryAcquireAction(interval)) != null;
   }
 
   @JsonProperty

@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.timeboundary;
@@ -25,15 +25,13 @@ import com.google.common.base.Functions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Ordering;
-import com.metamx.common.guava.MergeSequence;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
 import com.metamx.emitter.service.ServiceMetricEvent;
-import io.druid.collections.OrderedMergeSequence;
 import io.druid.query.BySegmentSkippingQueryRunner;
 import io.druid.query.CacheStrategy;
 import io.druid.query.DataSourceUtil;
+import io.druid.query.DruidMetrics;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
@@ -42,9 +40,9 @@ import io.druid.query.aggregation.MetricManipulationFn;
 import io.druid.timeline.LogicalSegment;
 import org.joda.time.DateTime;
 
-import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
 
 /**
  */
@@ -67,8 +65,8 @@ public class TimeBoundaryQueryQueryToolChest
       return segments;
     }
 
-    final T first = segments.get(0);
-    final T second = segments.get(segments.size() - 1);
+    final T min = query.isMaxTime() ? null : segments.get(0);
+    final T max = query.isMinTime() ? null : segments.get(segments.size() - 1);
 
     return Lists.newArrayList(
         Iterables.filter(
@@ -78,8 +76,8 @@ public class TimeBoundaryQueryQueryToolChest
               @Override
               public boolean apply(T input)
               {
-                return input.getInterval().overlaps(first.getInterval()) || input.getInterval()
-                    .overlaps(second.getInterval());
+                return (min != null && input.getInterval().overlaps(min.getInterval())) ||
+                       (max != null && input.getInterval().overlaps(max.getInterval()));
               }
             }
         )
@@ -95,13 +93,13 @@ public class TimeBoundaryQueryQueryToolChest
     {
       @Override
       protected Sequence<Result<TimeBoundaryResultValue>> doRun(
-          QueryRunner<Result<TimeBoundaryResultValue>> baseRunner, Query<Result<TimeBoundaryResultValue>> input
+          QueryRunner<Result<TimeBoundaryResultValue>> baseRunner, Query<Result<TimeBoundaryResultValue>> input, Map<String, Object> context
       )
       {
         TimeBoundaryQuery query = (TimeBoundaryQuery) input;
         return Sequences.simple(
             query.mergeResults(
-                Sequences.toList(baseRunner.run(query), Lists.<Result<TimeBoundaryResultValue>>newArrayList())
+                Sequences.toList(baseRunner.run(query, context), Lists.<Result<TimeBoundaryResultValue>>newArrayList())
             )
         );
       }
@@ -109,18 +107,11 @@ public class TimeBoundaryQueryQueryToolChest
   }
 
   @Override
-  public Sequence<Result<TimeBoundaryResultValue>> mergeSequences(Sequence<Sequence<Result<TimeBoundaryResultValue>>> seqOfSequences)
-  {
-    return new OrderedMergeSequence<Result<TimeBoundaryResultValue>>(getOrdering(), seqOfSequences);
-  }
-
-  @Override
   public ServiceMetricEvent.Builder makeMetricBuilder(TimeBoundaryQuery query)
   {
     return new ServiceMetricEvent.Builder()
-        .setUser2(DataSourceUtil.getMetricName(query.getDataSource()))
-        .setUser4(query.getType())
-        .setUser6("false");
+            .setDimension(DruidMetrics.DATASOURCE, DataSourceUtil.getMetricName(query.getDataSource()))
+            .setDimension(DruidMetrics.TYPE, query.getType());
   }
 
   @Override
@@ -145,10 +136,11 @@ public class TimeBoundaryQueryQueryToolChest
       @Override
       public byte[] computeCacheKey(TimeBoundaryQuery query)
       {
-        return ByteBuffer.allocate(2)
-            .put(TIMEBOUNDARY_QUERY)
-            .put(query.getCacheKey())
-            .array();
+        final byte[] cacheKey = query.getCacheKey();
+        return ByteBuffer.allocate(1 + cacheKey.length)
+                         .put(TIMEBOUNDARY_QUERY)
+                         .put(cacheKey)
+                         .array();
       }
 
       @Override
@@ -177,28 +169,17 @@ public class TimeBoundaryQueryQueryToolChest
         {
           @Override
           @SuppressWarnings("unchecked")
-          public Result<TimeBoundaryResultValue> apply(@Nullable Object input)
+          public Result<TimeBoundaryResultValue> apply(Object input)
           {
             List<Object> result = (List<Object>) input;
 
-            return new Result<TimeBoundaryResultValue>(
-                new DateTime(result.get(0)),
+            return new Result<>(
+                new DateTime(((Number)result.get(0)).longValue()),
                 new TimeBoundaryResultValue(result.get(1))
             );
           }
         };
       }
-
-      @Override
-      public Sequence<Result<TimeBoundaryResultValue>> mergeSequences(Sequence<Sequence<Result<TimeBoundaryResultValue>>> seqOfSequences)
-      {
-        return new MergeSequence<Result<TimeBoundaryResultValue>>(getOrdering(), seqOfSequences);
-      }
     };
-  }
-
-  public Ordering<Result<TimeBoundaryResultValue>> getOrdering()
-  {
-    return Ordering.natural();
   }
 }

@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.select;
@@ -25,6 +25,8 @@ import io.druid.granularity.QueryGranularity;
 import io.druid.query.Result;
 import org.joda.time.DateTime;
 
+import java.util.List;
+
 /**
  */
 public class SelectBinaryFn
@@ -32,14 +34,17 @@ public class SelectBinaryFn
 {
   private final QueryGranularity gran;
   private final PagingSpec pagingSpec;
+  private final boolean descending;
 
   public SelectBinaryFn(
       QueryGranularity granularity,
-      PagingSpec pagingSpec
+      PagingSpec pagingSpec,
+      boolean descending
   )
   {
     this.gran = granularity;
     this.pagingSpec = pagingSpec;
+    this.descending = descending;
   }
 
   @Override
@@ -55,14 +60,22 @@ public class SelectBinaryFn
       return arg1;
     }
 
+    final List<EventHolder> arg1Val = arg1.getValue().getEvents();
+    final List<EventHolder> arg2Val = arg2.getValue().getEvents();
+
+    if (arg1Val == null || arg1Val.isEmpty()) {
+      return arg2;
+    }
+
+    if (arg2Val == null || arg2Val.isEmpty()) {
+      return arg1;
+    }
+
     final DateTime timestamp = (gran instanceof AllGranularity)
                                ? arg1.getTimestamp()
                                : gran.toDateTime(gran.truncate(arg1.getTimestamp().getMillis()));
 
-    SelectResultValueBuilder builder = new SelectResultValueBuilder(timestamp, pagingSpec.getThreshold());
-
-    SelectResultValue arg1Val = arg1.getValue();
-    SelectResultValue arg2Val = arg2.getValue();
+    SelectResultValueBuilder builder = new SelectResultValueBuilder.MergeBuilder(timestamp, pagingSpec, descending);
 
     for (EventHolder event : arg1Val) {
       builder.addEntry(event);

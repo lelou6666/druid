@@ -1,33 +1,39 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.spec;
 
 import com.google.common.base.Throwables;
+import com.google.common.collect.Lists;
 import com.metamx.common.guava.Accumulator;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Yielder;
 import com.metamx.common.guava.YieldingAccumulator;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
+import io.druid.query.Result;
+import io.druid.query.SegmentDescriptor;
+import io.druid.segment.SegmentMissingException;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
@@ -35,11 +41,11 @@ import java.util.concurrent.Callable;
 public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
 {
   private final QueryRunner<T> base;
-  private final QuerySegmentSpec specificSpec;
+  private final SpecificSegmentSpec specificSpec;
 
   public SpecificSegmentQueryRunner(
       QueryRunner<T> base,
-      QuerySegmentSpec specificSpec
+      SpecificSegmentSpec specificSpec
   )
   {
     this.base = base;
@@ -47,7 +53,7 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
   }
 
   @Override
-  public Sequence<T> run(final Query<T> input)
+  public Sequence<T> run(final Query<T> input, final Map<String, Object> responseContext)
   {
     final Query<T> query = input.withQuerySegmentSpec(specificSpec);
 
@@ -55,14 +61,16 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
     final String currThreadName = currThread.getName();
     final String newName = String.format("%s_%s_%s", query.getType(), query.getDataSource(), query.getIntervals());
 
-    final Sequence<T> baseSequence = doNamed(currThread, currThreadName, newName, new Callable<Sequence<T>>()
-    {
-      @Override
-      public Sequence<T> call() throws Exception
-      {
-        return base.run(query);
-      }
-    });
+    final Sequence<T> baseSequence = doNamed(
+        currThread, currThreadName, newName, new Callable<Sequence<T>>()
+        {
+          @Override
+          public Sequence<T> call() throws Exception
+          {
+            return base.run(query, responseContext);
+          }
+        }
+    );
 
     return new Sequence<T>()
     {
@@ -75,14 +83,28 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
               @Override
               public OutType call() throws Exception
               {
-                return baseSequence.accumulate(initValue, accumulator);
+                try {
+                  return baseSequence.accumulate(initValue, accumulator);
+                }
+                catch (SegmentMissingException e) {
+                  List<SegmentDescriptor> missingSegments = (List<SegmentDescriptor>) responseContext.get(Result.MISSING_SEGMENTS_KEY);
+                  if (missingSegments == null) {
+                    missingSegments = Lists.newArrayList();
+                    responseContext.put(Result.MISSING_SEGMENTS_KEY, missingSegments);
+                  }
+                  missingSegments.add(specificSpec.getDescriptor());
+                  return initValue;
+                }
               }
             }
         );
       }
 
       @Override
-      public <OutType> Yielder<OutType> toYielder(final OutType initValue, final YieldingAccumulator<OutType, T> accumulator)
+      public <OutType> Yielder<OutType> toYielder(
+          final OutType initValue,
+          final YieldingAccumulator<OutType, T> accumulator
+      )
       {
         return doItNamed(
             new Callable<Yielder<OutType>>()

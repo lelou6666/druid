@@ -1,26 +1,29 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.realtime;
 
+import com.fasterxml.jackson.databind.InjectableValues;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.metamx.common.Granularity;
+import io.druid.client.cache.CacheConfig;
+import io.druid.client.cache.MapCache;
 import io.druid.data.input.impl.DimensionsSpec;
 import io.druid.data.input.impl.JSONParseSpec;
 import io.druid.data.input.impl.StringInputRowParser;
@@ -29,57 +32,92 @@ import io.druid.granularity.QueryGranularity;
 import io.druid.jackson.DefaultObjectMapper;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
+import io.druid.segment.TestHelper;
 import io.druid.segment.indexing.DataSchema;
-import io.druid.segment.indexing.RealtimeTuningConfig;
 import io.druid.segment.indexing.RealtimeIOConfig;
+import io.druid.segment.indexing.RealtimeTuningConfig;
 import io.druid.segment.indexing.granularity.UniformGranularitySpec;
 import io.druid.segment.realtime.plumber.RealtimePlumberSchool;
-import junit.framework.Assert;
+import org.junit.Assert;
 import org.junit.Test;
 
+import java.io.File;
 import java.util.Arrays;
+import java.util.Map;
 
 /**
  */
 public class FireDepartmentTest
 {
+
+  public static final CacheConfig NO_CACHE_CONFIG = new CacheConfig()
+  {
+    @Override
+    public boolean isPopulateCache()
+    {
+      return false;
+    }
+
+    @Override
+    public boolean isUseCache()
+    {
+      return false;
+    }
+  };
+
   @Test
   public void testSerde() throws Exception
   {
     ObjectMapper jsonMapper = new DefaultObjectMapper();
+    jsonMapper.setInjectableValues(new InjectableValues.Std().addValue(ObjectMapper.class, jsonMapper));
 
     FireDepartment schema = new FireDepartment(
         new DataSchema(
             "foo",
-            new StringInputRowParser(
-                new JSONParseSpec(
-                    new TimestampSpec(
-                        "timestamp",
-                        "auto"
-                    ),
-                    new DimensionsSpec(
-                        Arrays.asList("dim1", "dim2"),
-                        null,
-                        null
+            jsonMapper.convertValue(
+                new StringInputRowParser(
+                    new JSONParseSpec(
+                        new TimestampSpec(
+                            "timestamp",
+                            "auto",
+                            null
+                        ),
+                        new DimensionsSpec(
+                            DimensionsSpec.getDefaultSchemas(Arrays.asList("dim1", "dim2")),
+                            null,
+                            null
+                        )
                     )
                 ),
-                null, null, null, null
+                Map.class
             ),
             new AggregatorFactory[]{
                 new CountAggregatorFactory("count")
             },
-            new UniformGranularitySpec(Granularity.HOUR, QueryGranularity.MINUTE, null, Granularity.HOUR)
+            new UniformGranularitySpec(Granularity.HOUR, QueryGranularity.MINUTE, null),
+            jsonMapper
         ),
         new RealtimeIOConfig(
             null,
             new RealtimePlumberSchool(
-                null, null, null, null, null, null, null, null, null, null, null, null, 0
-            )
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                TestHelper.getTestIndexMerger(),
+                TestHelper.getTestIndexMergerV9(),
+                TestHelper.getTestIndexIO(),
+                MapCache.create(0),
+                NO_CACHE_CONFIG,
+                TestHelper.getObjectMapper()
+
+            ),
+            null
         ),
-        new RealtimeTuningConfig(
-            null, null, null, null, null, null, null, null
-        ),
-        null, null, null, null
+        RealtimeTuningConfig.makeDefaultTuningConfig(new File("/tmp/nonexistent"))
     );
 
     String json = jsonMapper.writeValueAsString(schema);
@@ -87,5 +125,6 @@ public class FireDepartmentTest
     FireDepartment newSchema = jsonMapper.readValue(json, FireDepartment.class);
 
     Assert.assertEquals(schema.getDataSchema().getDataSource(), newSchema.getDataSchema().getDataSource());
+    Assert.assertEquals("/tmp/nonexistent", schema.getTuningConfig().getBasePersistDirectory().toString());
   }
 }

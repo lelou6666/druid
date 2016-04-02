@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.topn;
@@ -29,8 +29,8 @@ import io.druid.query.QueryRunnerTestHelper;
 import io.druid.query.Result;
 import io.druid.query.TestQueryRunners;
 import io.druid.query.aggregation.AggregatorFactory;
-import io.druid.query.aggregation.MaxAggregatorFactory;
-import io.druid.query.aggregation.MinAggregatorFactory;
+import io.druid.query.aggregation.DoubleMaxAggregatorFactory;
+import io.druid.query.aggregation.DoubleMinAggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.segment.TestHelper;
 import org.joda.time.DateTime;
@@ -41,7 +41,7 @@ import org.junit.runners.Parameterized;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -58,36 +58,43 @@ public class TopNUnionQueryTest
   }
 
   @Parameterized.Parameters
-  public static Collection<?> constructorFeeder() throws IOException
+  public static Iterable<Object[]> constructorFeeder() throws IOException
   {
-    List<Object> retVal = Lists.newArrayList();
-    retVal.addAll(
-        QueryRunnerTestHelper.makeUnionQueryRunners(
-            new TopNQueryRunnerFactory(
-                TestQueryRunners.getPool(),
-                new TopNQueryQueryToolChest(new TopNQueryConfig())
-            )
-        )
-    );
-    retVal.addAll(
-        QueryRunnerTestHelper.makeUnionQueryRunners(
-            new TopNQueryRunnerFactory(
-                new StupidPool<ByteBuffer>(
-                    new Supplier<ByteBuffer>()
-                    {
-                      @Override
-                      public ByteBuffer get()
-                      {
-                        return ByteBuffer.allocate(2000);
-                      }
-                    }
+    return QueryRunnerTestHelper.cartesian(
+        Iterables.concat(
+            QueryRunnerTestHelper.makeUnionQueryRunners(
+                new TopNQueryRunnerFactory(
+                    TestQueryRunners.getPool(),
+                    new TopNQueryQueryToolChest(
+                        new TopNQueryConfig(),
+                        QueryRunnerTestHelper.NoopIntervalChunkingQueryRunnerDecorator()
+                    ),
+                    QueryRunnerTestHelper.NOOP_QUERYWATCHER
                 ),
-                new TopNQueryQueryToolChest(new TopNQueryConfig())
+                QueryRunnerTestHelper.unionDataSource
+            ),
+            QueryRunnerTestHelper.makeUnionQueryRunners(
+                new TopNQueryRunnerFactory(
+                    new StupidPool<ByteBuffer>(
+                        new Supplier<ByteBuffer>()
+                        {
+                          @Override
+                          public ByteBuffer get()
+                          {
+                            return ByteBuffer.allocate(2000);
+                          }
+                        }
+                    ),
+                    new TopNQueryQueryToolChest(
+                        new TopNQueryConfig(),
+                        QueryRunnerTestHelper.NoopIntervalChunkingQueryRunnerDecorator()
+                    ),
+                    QueryRunnerTestHelper.NOOP_QUERYWATCHER
+                ),
+                QueryRunnerTestHelper.unionDataSource
             )
         )
     );
-
-    return retVal;
   }
 
   @Test
@@ -96,7 +103,7 @@ public class TopNUnionQueryTest
     TopNQuery query = new TopNQueryBuilder()
         .dataSource(QueryRunnerTestHelper.unionDataSource)
         .granularity(QueryRunnerTestHelper.allGran)
-        .dimension(QueryRunnerTestHelper.providerDimension)
+        .dimension(QueryRunnerTestHelper.marketDimension)
         .metric(QueryRunnerTestHelper.dependentPostAggMetric)
         .threshold(4)
         .intervals(QueryRunnerTestHelper.fullOnInterval)
@@ -105,8 +112,8 @@ public class TopNUnionQueryTest
                 Iterables.concat(
                     QueryRunnerTestHelper.commonAggregators,
                     Lists.newArrayList(
-                        new MaxAggregatorFactory("maxIndex", "index"),
-                        new MinAggregatorFactory("minIndex", "index")
+                        new DoubleMaxAggregatorFactory("maxIndex", "index"),
+                        new DoubleMinAggregatorFactory("minIndex", "index")
                     )
                 )
             )
@@ -126,7 +133,7 @@ public class TopNUnionQueryTest
             new TopNResultValue(
                 Arrays.<Map<String, Object>>asList(
                     ImmutableMap.<String, Object>builder()
-                                .put(QueryRunnerTestHelper.providerDimension, "total_market")
+                                .put(QueryRunnerTestHelper.marketDimension, "total_market")
                                 .put("rows", 744L)
                                 .put("index", 862719.3151855469D)
                                 .put("addRowsIndexConstant", 863464.3151855469D)
@@ -140,7 +147,7 @@ public class TopNUnionQueryTest
                                 )
                                 .build(),
                     ImmutableMap.<String, Object>builder()
-                                .put(QueryRunnerTestHelper.providerDimension, "upfront")
+                                .put(QueryRunnerTestHelper.marketDimension, "upfront")
                                 .put("rows", 744L)
                                 .put("index", 768184.4240722656D)
                                 .put("addRowsIndexConstant", 768929.4240722656D)
@@ -154,7 +161,7 @@ public class TopNUnionQueryTest
                                 )
                                 .build(),
                     ImmutableMap.<String, Object>builder()
-                                .put(QueryRunnerTestHelper.providerDimension, "spot")
+                                .put(QueryRunnerTestHelper.marketDimension, "spot")
                                 .put("rows", 3348L)
                                 .put("index", 382426.28929138184D)
                                 .put("addRowsIndexConstant", 385775.28929138184D)
@@ -171,8 +178,8 @@ public class TopNUnionQueryTest
             )
         )
     );
-
-    TestHelper.assertExpectedResults(expectedResults, runner.run(query));
+    HashMap<String,Object> context = new HashMap<String, Object>();
+    TestHelper.assertExpectedResults(expectedResults, runner.run(query, context));
   }
 
 

@@ -1,103 +1,138 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.initialization;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.curator.utils.ZKPaths;
-import org.skife.config.Config;
 
-public abstract class ZkPathsConfig
+public class ZkPathsConfig
 {
-  @Config("druid.zk.paths.base")
-  public String getZkBasePath()
+  @JsonProperty
+  private
+  String base = "druid";
+  @JsonProperty
+  private
+  String propertiesPath;
+  @JsonProperty
+  private
+  String announcementsPath;
+  @JsonProperty @Deprecated
+  private
+  String servedSegmentsPath;
+  @JsonProperty
+  private
+  String liveSegmentsPath;
+  @JsonProperty
+  private
+  String coordinatorPath;
+  @JsonProperty
+  private
+  String loadQueuePath;
+  @JsonProperty
+  private
+  String connectorPath;
+
+  public String getBase()
   {
-    return "druid";
+    return base;
   }
 
-  @Config("druid.zk.paths.propertiesPath")
   public String getPropertiesPath()
   {
-    return defaultPath("properties");
+    return (null == propertiesPath) ? defaultPath("properties") : propertiesPath;
   }
 
-  @Config("druid.zk.paths.announcementsPath")
   public String getAnnouncementsPath()
   {
-    return defaultPath("announcements");
+    return (null == announcementsPath) ? defaultPath("announcements") : announcementsPath;
   }
 
-  @Config("druid.zk.paths.servedSegmentsPath")
+  @Deprecated
   public String getServedSegmentsPath()
   {
-    return defaultPath("servedSegments");
+    return (null == servedSegmentsPath) ?  defaultPath("servedSegments") : servedSegmentsPath;
   }
 
-  @Config("druid.zk.paths.liveSegmentsPath")
   public String getLiveSegmentsPath()
   {
-    return defaultPath("segments");
+    return (null == liveSegmentsPath) ? defaultPath("segments") : liveSegmentsPath;
   }
 
-  @Config("druid.zk.paths.loadQueuePath")
-  public String getLoadQueuePath()
-  {
-    return defaultPath("loadQueue");
-  }
-
-  @Config("druid.zk.paths.coordinatorPath")
   public String getCoordinatorPath()
   {
-    return defaultPath("coordinator");
+    return (null == coordinatorPath) ?  defaultPath("coordinator") : coordinatorPath;
   }
 
-  @Config("druid.zk.paths.connectorPath")
+  public String getLoadQueuePath()
+  {
+    return (null == loadQueuePath) ?  defaultPath("loadQueue") : loadQueuePath;
+  }
+
   public String getConnectorPath()
   {
-    return defaultPath("connector");
+    return (null == connectorPath) ?  defaultPath("connector") : connectorPath;
   }
 
-  @Config("druid.zk.paths.indexer.announcementsPath")
-  public String getIndexerAnnouncementPath()
+  public String defaultPath(final String subPath)
   {
-    return defaultPath("indexer/announcements");
+    return ZKPaths.makePath(getBase(), subPath);
   }
 
-  @Config("druid.zk.paths.indexer.tasksPath")
-  public String getIndexerTaskPath()
-  {
-    return defaultPath("indexer/tasks");
+  @Override
+  public boolean equals(Object other){
+    if(null == other){
+      return false;
+    }
+    if(this == other){
+      return true;
+    }
+    if(!(other instanceof ZkPathsConfig)){
+      return false;
+    }
+    ZkPathsConfig otherConfig = (ZkPathsConfig) other;
+    if(
+        this.getBase().equals(otherConfig.getBase()) &&
+        this.getAnnouncementsPath().equals(otherConfig.getAnnouncementsPath()) &&
+        this.getConnectorPath().equals(otherConfig.getConnectorPath()) &&
+        this.getLiveSegmentsPath().equals(otherConfig.getLiveSegmentsPath()) &&
+        this.getCoordinatorPath().equals(otherConfig.getCoordinatorPath()) &&
+        this.getLoadQueuePath().equals(otherConfig.getLoadQueuePath()) &&
+        this.getPropertiesPath().equals(otherConfig.getPropertiesPath()) &&
+        this.getServedSegmentsPath().equals(otherConfig.getServedSegmentsPath())
+        ){
+      return true;
+    }
+    return false;
   }
 
-  @Config("druid.zk.paths.indexer.statusPath")
-  public String getIndexerStatusPath()
+  @Override
+  public int hashCode()
   {
-    return defaultPath("indexer/status");
-  }
-
-  @Config("druid.zk.paths.indexer.leaderLatchPath")
-  public String getIndexerLeaderLatchPath()
-  {
-    return defaultPath("indexer/leaderLatchPath");
-  }
-
-  private String defaultPath(final String subPath)
-  {
-    return ZKPaths.makePath(getZkBasePath(), subPath);
+    int result = base != null ? base.hashCode() : 0;
+    result = 31 * result + (propertiesPath != null ? propertiesPath.hashCode() : 0);
+    result = 31 * result + (announcementsPath != null ? announcementsPath.hashCode() : 0);
+    result = 31 * result + (servedSegmentsPath != null ? servedSegmentsPath.hashCode() : 0);
+    result = 31 * result + (liveSegmentsPath != null ? liveSegmentsPath.hashCode() : 0);
+    result = 31 * result + (coordinatorPath != null ? coordinatorPath.hashCode() : 0);
+    result = 31 * result + (loadQueuePath != null ? loadQueuePath.hashCode() : 0);
+    result = 31 * result + (connectorPath != null ? connectorPath.hashCode() : 0);
+    return result;
   }
 }

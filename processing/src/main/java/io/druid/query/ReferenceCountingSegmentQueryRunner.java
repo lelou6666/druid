@@ -1,59 +1,68 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query;
 
-import com.google.common.io.Closeables;
+import com.metamx.common.guava.CloseQuietly;
 import com.metamx.common.guava.ResourceClosingSequence;
 import com.metamx.common.guava.Sequence;
 import io.druid.segment.ReferenceCountingSegment;
 
 import java.io.Closeable;
+import java.util.Map;
 
 /**
-*/
+ */
 public class ReferenceCountingSegmentQueryRunner<T> implements QueryRunner<T>
 {
   private final QueryRunnerFactory<T, Query<T>> factory;
   private final ReferenceCountingSegment adapter;
+  private final SegmentDescriptor descriptor;
 
   public ReferenceCountingSegmentQueryRunner(
       QueryRunnerFactory<T, Query<T>> factory,
-      ReferenceCountingSegment adapter
+      ReferenceCountingSegment adapter,
+      SegmentDescriptor descriptor
   )
   {
     this.factory = factory;
     this.adapter = adapter;
+    this.descriptor = descriptor;
   }
 
   @Override
-  public Sequence<T> run(final Query<T> query)
+  public Sequence<T> run(final Query<T> query, Map<String, Object> responseContext)
   {
     final Closeable closeable = adapter.increment();
-    try {
-      final Sequence<T> baseSequence = factory.createRunner(adapter).run(query);
+    if (closeable != null) {
+      try {
+        final Sequence<T> baseSequence = factory.createRunner(adapter).run(query, responseContext);
 
-      return new ResourceClosingSequence<T>(baseSequence, closeable);
-    }
-    catch (RuntimeException e) {
-      Closeables.closeQuietly(closeable);
-      throw e;
+        return new ResourceClosingSequence<T>(baseSequence, closeable);
+      }
+      catch (RuntimeException e) {
+        CloseQuietly.close(closeable);
+        throw e;
+      }
+    } else {
+      // Segment was closed before we had a chance to increment the reference count
+      return new ReportTimelineMissingSegmentQueryRunner<T>(descriptor).run(query, responseContext);
     }
   }
 }

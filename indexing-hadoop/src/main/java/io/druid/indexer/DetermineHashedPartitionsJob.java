@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2014  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexer;
@@ -44,12 +44,9 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.NullWritable;
-import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Partitioner;
 import org.apache.hadoop.mapreduce.Reducer;
-import org.apache.hadoop.mapreduce.lib.input.CombineTextInputFormat;
-import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
 import org.joda.time.DateTime;
@@ -86,17 +83,13 @@ public class DetermineHashedPartitionsJob implements Jobby
        * in the final segment.
        */
       long startTime = System.currentTimeMillis();
-      final Job groupByJob = new Job(
+      final Job groupByJob = Job.getInstance(
           new Configuration(),
           String.format("%s-determine_partitions_hashed-%s", config.getDataSource(), config.getIntervals())
       );
 
       JobHelper.injectSystemProperties(groupByJob);
-      if (config.isCombineText()) {
-        groupByJob.setInputFormatClass(CombineTextInputFormat.class);
-      } else {
-        groupByJob.setInputFormatClass(TextInputFormat.class);
-      }
+      config.addJobProperties(groupByJob);
       groupByJob.setMapperClass(DetermineCardinalityMapper.class);
       groupByJob.setMapOutputKeyClass(LongWritable.class);
       groupByJob.setMapOutputValueClass(BytesWritable.class);
@@ -110,10 +103,13 @@ public class DetermineHashedPartitionsJob implements Jobby
       } else {
         groupByJob.setNumReduceTasks(config.getSegmentGranularIntervals().get().size());
       }
-      JobHelper.setupClasspath(config, groupByJob);
+      JobHelper.setupClasspath(
+          JobHelper.distributedClassPath(config.getWorkingPath()),
+          JobHelper.distributedClassPath(config.makeIntermediatePath()),
+          groupByJob
+      );
 
       config.addInputPaths(groupByJob);
-      config.addJobProperties(groupByJob);
       config.intoConfiguration(groupByJob);
       FileOutputFormat.setOutputPath(groupByJob, config.makeGroupedDataDir());
 
@@ -137,7 +133,7 @@ public class DetermineHashedPartitionsJob implements Jobby
         if (!Utils.exists(groupByJob, fileSystem, intervalInfoPath)) {
           throw new ISE("Path[%s] didn't exist!?", intervalInfoPath);
         }
-        List<Interval> intervals = config.jsonMapper.readValue(
+        List<Interval> intervals = config.JSON_MAPPER.readValue(
             Utils.openInputStream(groupByJob, intervalInfoPath), new TypeReference<List<Interval>>()
         {
         }
@@ -146,8 +142,7 @@ public class DetermineHashedPartitionsJob implements Jobby
             new UniformGranularitySpec(
                 config.getGranularitySpec().getSegmentGranularity(),
                 config.getGranularitySpec().getQueryGranularity(),
-                intervals,
-                config.getGranularitySpec().getSegmentGranularity()
+                intervals
             )
         );
         log.info("Determined Intervals for Job [%s]" + config.getSegmentGranularIntervals());
@@ -162,7 +157,7 @@ public class DetermineHashedPartitionsJob implements Jobby
           fileSystem = partitionInfoPath.getFileSystem(groupByJob.getConfiguration());
         }
         if (Utils.exists(groupByJob, fileSystem, partitionInfoPath)) {
-          final Long numRows = config.jsonMapper.readValue(
+          final Long numRows = config.JSON_MAPPER.readValue(
               Utils.openInputStream(groupByJob, partitionInfoPath), new TypeReference<Long>()
           {
           }
@@ -179,7 +174,17 @@ public class DetermineHashedPartitionsJob implements Jobby
             actualSpecs.add(new HadoopyShardSpec(new NoneShardSpec(), shardCount++));
           } else {
             for (int i = 0; i < numberOfShards; ++i) {
-              actualSpecs.add(new HadoopyShardSpec(new HashBasedNumberedShardSpec(i, numberOfShards), shardCount++));
+              actualSpecs.add(
+                  new HadoopyShardSpec(
+                      new HashBasedNumberedShardSpec(
+                          i,
+                          numberOfShards,
+                          null,
+                          HadoopDruidIndexerConfig.JSON_MAPPER
+                      ),
+                      shardCount++
+                  )
+              );
               log.info("DateTime[%s], partition[%d], spec[%s]", bucket, i, actualSpecs.get(i));
             }
           }
@@ -235,7 +240,7 @@ public class DetermineHashedPartitionsJob implements Jobby
     @Override
     protected void innerMap(
         InputRow inputRow,
-        Text text,
+        Object value,
         Context context
     ) throws IOException, InterruptedException
     {
@@ -264,7 +269,7 @@ public class DetermineHashedPartitionsJob implements Jobby
       }
       hyperLogLogs.get(interval)
                   .add(
-                      hashFunction.hashBytes(HadoopDruidIndexerConfig.jsonMapper.writeValueAsBytes(groupKey))
+                      hashFunction.hashBytes(HadoopDruidIndexerConfig.JSON_MAPPER.writeValueAsBytes(groupKey))
                                   .asBytes()
                   );
     }
@@ -321,7 +326,7 @@ public class DetermineHashedPartitionsJob implements Jobby
       );
 
       try {
-        HadoopDruidIndexerConfig.jsonMapper.writerWithType(
+        HadoopDruidIndexerConfig.JSON_MAPPER.writerWithType(
             new TypeReference<Long>()
             {
             }
@@ -347,7 +352,7 @@ public class DetermineHashedPartitionsJob implements Jobby
         );
 
         try {
-          HadoopDruidIndexerConfig.jsonMapper.writerWithType(
+          HadoopDruidIndexerConfig.JSON_MAPPER.writerWithType(
               new TypeReference<List<Interval>>()
               {
               }

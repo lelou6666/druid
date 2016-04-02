@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.common.actions;
@@ -26,18 +26,24 @@ import com.google.common.base.Throwables;
 import com.metamx.common.ISE;
 import com.metamx.common.logger.Logger;
 import com.metamx.http.client.HttpClient;
-import com.metamx.http.client.response.ToStringResponseHandler;
+import com.metamx.http.client.Request;
+import com.metamx.http.client.response.StatusResponseHandler;
+import com.metamx.http.client.response.StatusResponseHolder;
 import io.druid.client.selector.Server;
 import io.druid.curator.discovery.ServerDiscoverySelector;
 import io.druid.indexing.common.RetryPolicy;
 import io.druid.indexing.common.RetryPolicyFactory;
 import io.druid.indexing.common.task.Task;
 import org.jboss.netty.channel.ChannelException;
+import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.joda.time.Duration;
 
+import javax.ws.rs.core.MediaType;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Map;
+import java.util.Random;
 
 public class RemoteTaskActionClient implements TaskActionClient
 {
@@ -46,6 +52,7 @@ public class RemoteTaskActionClient implements TaskActionClient
   private final ServerDiscoverySelector selector;
   private final RetryPolicyFactory retryPolicyFactory;
   private final ObjectMapper jsonMapper;
+  private final Random random = new Random();
 
   private static final Logger log = new Logger(RemoteTaskActionClient.class);
 
@@ -75,23 +82,27 @@ public class RemoteTaskActionClient implements TaskActionClient
 
     while (true) {
       try {
+        final Server server;
         final URI serviceUri;
         try {
-          serviceUri = getServiceUri();
+          server = getServiceInstance();
+          serviceUri = makeServiceUri(server);
         }
         catch (Exception e) {
+          // Want to retry, so throw an IOException.
           throw new IOException("Failed to locate service uri", e);
         }
 
-        final String response;
+        final StatusResponseHolder response;
 
         log.info("Submitting action for task[%s] to overlord[%s]: %s", task.getId(), serviceUri, taskAction);
 
         try {
-          response = httpClient.post(serviceUri.toURL())
-                               .setContent("application/json", dataToSend)
-                               .go(new ToStringResponseHandler(Charsets.UTF_8))
-                               .get();
+          response = httpClient.go(
+              new Request(HttpMethod.POST, serviceUri.toURL())
+                  .setContent(MediaType.APPLICATION_JSON, dataToSend),
+              new StatusResponseHandler(Charsets.UTF_8)
+          ).get();
         }
         catch (Exception e) {
           Throwables.propagateIfInstanceOf(e.getCause(), IOException.class);
@@ -99,13 +110,24 @@ public class RemoteTaskActionClient implements TaskActionClient
           throw Throwables.propagate(e);
         }
 
-        final Map<String, Object> responseDict = jsonMapper.readValue(
-            response, new TypeReference<Map<String, Object>>()
-        {
+        if (response.getStatus().getCode() / 100 == 2) {
+          final Map<String, Object> responseDict = jsonMapper.readValue(
+              response.getContent(),
+              new TypeReference<Map<String, Object>>()
+              {
+              }
+          );
+          return jsonMapper.convertValue(responseDict.get("result"), taskAction.getReturnTypeReference());
+        } else {
+          // Want to retry, so throw an IOException.
+          throw new IOException(
+              String.format(
+                  "Scary HTTP status returned: %s. Check your overlord[%s] logs for exceptions.",
+                  response.getStatus(),
+                  server.getHost()
+              )
+          );
         }
-        );
-
-        return jsonMapper.convertValue(responseDict.get("result"), taskAction.getReturnTypeReference());
       }
       catch (IOException | ChannelException e) {
         log.warn(e, "Exception submitting action for task[%s]", task.getId());
@@ -115,7 +137,7 @@ public class RemoteTaskActionClient implements TaskActionClient
           throw e;
         } else {
           try {
-            final long sleepTime = delay.getMillis();
+            final long sleepTime = jitter(delay.getMillis());
             log.info("Will try again in [%s].", new Duration(sleepTime).toString());
             Thread.sleep(sleepTime);
           }
@@ -127,13 +149,24 @@ public class RemoteTaskActionClient implements TaskActionClient
     }
   }
 
-  private URI getServiceUri() throws Exception
+  private long jitter(long input){
+    final double jitter = random.nextGaussian() * input / 4.0;
+    long retval = input + (long)jitter;
+    return retval < 0 ? 0 : retval;
+  }
+
+  private URI makeServiceUri(final Server instance) throws URISyntaxException
+  {
+    return new URI(instance.getScheme(), null, instance.getAddress(), instance.getPort(), "/druid/indexer/v1/action", null, null);
+  }
+
+  private Server getServiceInstance()
   {
     final Server instance = selector.pick();
     if (instance == null) {
       throw new ISE("Cannot find instance of indexer to talk to!");
+    } else {
+      return instance;
     }
-
-    return new URI(String.format("%s://%s%s", instance.getScheme(), instance.getHost(), "/druid/indexer/v1/action"));
   }
 }

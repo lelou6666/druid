@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.topn;
@@ -28,7 +28,7 @@ import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DefaultDimensionSpec;
 import io.druid.query.dimension.DimensionSpec;
 import io.druid.query.filter.DimFilter;
-import io.druid.query.filter.OrDimFilter;
+import io.druid.query.filter.InDimFilter;
 import io.druid.query.filter.SelectorDimFilter;
 import io.druid.query.spec.LegacySegmentSpec;
 import io.druid.query.spec.QuerySegmentSpec;
@@ -39,12 +39,12 @@ import java.util.Map;
 
 /**
  * A Builder for TopNQuery.
- * <p/>
+ * 
  * Required: dataSource(), intervals(), metric() and threshold() must be called before build()
  * Additional requirement for numeric metric sorts: aggregators() must be called before build()
- * <p/>
+ * 
  * Optional: filters(), granularity(), postAggregators() and context() can be called before build()
- * <p/>
+ * 
  * Usage example:
  * <pre><code>
  *   TopNQuery query = new TopNQueryBuilder()
@@ -252,11 +252,7 @@ public class TopNQueryBuilder
 
   public TopNQueryBuilder filters(String dimensionName, String value, String... values)
   {
-    List<DimFilter> fields = Lists.<DimFilter>newArrayList(new SelectorDimFilter(dimensionName, value));
-    for (String val : values) {
-      fields.add(new SelectorDimFilter(dimensionName, val));
-    }
-    dimFilter = new OrDimFilter(fields);
+    dimFilter = new InDimFilter(dimensionName, Lists.asList(value, values));
     return this;
   }
 

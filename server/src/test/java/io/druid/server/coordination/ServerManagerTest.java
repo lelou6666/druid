@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.coordination;
@@ -26,10 +26,10 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.metamx.common.IAE;
 import com.metamx.common.MapUtils;
 import com.metamx.common.Pair;
-import com.metamx.common.guava.ConcatSequence;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
 import com.metamx.common.guava.Yielder;
@@ -71,8 +71,10 @@ import org.junit.Test;
 import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -139,7 +141,10 @@ public class ServerManagerTest
           }
         },
         new NoopServiceEmitter(),
-        serverManagerExec, new DefaultObjectMapper(), new LocalCacheProvider().get(),
+        serverManagerExec,
+        MoreExecutors.sameThreadExecutor(),
+        new DefaultObjectMapper(),
+        new LocalCacheProvider().get(),
         new CacheConfig()
     );
 
@@ -274,7 +279,7 @@ public class ServerManagerTest
         )
     );
 
-    queryNotifyLatch.await(25, TimeUnit.MILLISECONDS);
+    queryNotifyLatch.await(1000, TimeUnit.MILLISECONDS);
 
     Assert.assertEquals(1, factory.getSegmentReferences().size());
 
@@ -313,7 +318,7 @@ public class ServerManagerTest
         )
     );
 
-    Assert.assertTrue("Operation must complete within 100ms", queryNotifyLatch.await(100, TimeUnit.MILLISECONDS));
+    queryNotifyLatch.await(1000, TimeUnit.MILLISECONDS);
 
     Assert.assertEquals(1, factory.getSegmentReferences().size());
 
@@ -356,7 +361,7 @@ public class ServerManagerTest
         )
     );
 
-    queryNotifyLatch.await(25, TimeUnit.MILLISECONDS);
+    queryNotifyLatch.await(1000, TimeUnit.MILLISECONDS);
 
     Assert.assertEquals(1, factory.getSegmentReferences().size());
 
@@ -390,7 +395,7 @@ public class ServerManagerTest
   private void waitForTestVerificationAndCleanup(Future future)
   {
     try {
-      queryNotifyLatch.await(25, TimeUnit.MILLISECONDS);
+      queryNotifyLatch.await(1000, TimeUnit.MILLISECONDS);
       queryWaitYieldLatch.countDown();
       queryWaitLatch.countDown();
       future.get();
@@ -421,14 +426,14 @@ public class ServerManagerTest
         query,
         intervals
     );
-
     return serverManagerExec.submit(
         new Runnable()
         {
           @Override
           public void run()
           {
-            Sequence<Result<SearchResultValue>> seq = runner.run(query);
+            Map<String, Object> context = new HashMap<String, Object>();
+            Sequence<Result<SearchResultValue>> seq = runner.run(query, context);
             Sequences.toList(seq, Lists.<Result<SearchResultValue>>newArrayList());
             Iterator<SegmentForTesting> adaptersIter = factory.getAdapters().iterator();
 
@@ -460,7 +465,7 @@ public class ServerManagerTest
               Arrays.asList("metric1", "metric2"),
               new NoneShardSpec(),
               IndexIO.CURRENT_VERSION_ID,
-              123l
+              123L
           )
       );
     }
@@ -482,7 +487,7 @@ public class ServerManagerTest
               Arrays.asList("metric1", "metric2"),
               new NoneShardSpec(),
               IndexIO.CURRENT_VERSION_ID,
-              123l
+              123L
           )
       );
     }
@@ -563,12 +568,6 @@ public class ServerManagerTest
     public QueryRunner<T> mergeResults(QueryRunner<T> runner)
     {
       return runner;
-    }
-
-    @Override
-    public Sequence<T> mergeSequences(Sequence<Sequence<T>> seqOfSequences)
-    {
-      return new ConcatSequence<T>(seqOfSequences);
     }
 
     @Override
@@ -677,9 +676,9 @@ public class ServerManagerTest
     }
 
     @Override
-    public Sequence<T> run(Query<T> query)
+    public Sequence<T> run(Query<T> query, Map<String, Object> responseContext)
     {
-      return new BlockingSequence<T>(runner.run(query), waitLatch, waitYieldLatch, notifyLatch);
+      return new BlockingSequence<T>(runner.run(query, responseContext), waitLatch, waitYieldLatch, notifyLatch);
     }
   }
 
@@ -712,7 +711,7 @@ public class ServerManagerTest
       notifyLatch.countDown();
 
       try {
-        waitYieldLatch.await(25, TimeUnit.MILLISECONDS);
+        waitYieldLatch.await(1000, TimeUnit.MILLISECONDS);
       }
       catch (Exception e) {
         throw Throwables.propagate(e);
@@ -725,7 +724,7 @@ public class ServerManagerTest
         public OutType get()
         {
           try {
-            waitLatch.await(25, TimeUnit.MILLISECONDS);
+            waitLatch.await(1000, TimeUnit.MILLISECONDS);
           }
           catch (Exception e) {
             throw Throwables.propagate(e);

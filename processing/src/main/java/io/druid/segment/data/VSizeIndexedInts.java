@@ -1,24 +1,25 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.data;
 
+import com.google.common.collect.Lists;
 import com.google.common.primitives.Ints;
 import com.metamx.common.IAE;
 
@@ -32,7 +33,7 @@ import java.util.List;
  */
 public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInts>
 {
-  private static final byte version = 0x0;
+  public static final byte VERSION = 0x0;
 
   public static VSizeIndexedInts fromArray(int[] array)
   {
@@ -44,11 +45,36 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
     return fromList(Ints.asList(array), maxValue);
   }
 
+  public static VSizeIndexedInts empty()
+  {
+    return fromList(Lists.<Integer>newArrayList(), 0);
+  }
+
+  /**
+   * provide for performance reason.
+   */
+  public static byte[] getBytesNoPaddingfromList(List<Integer> list, int maxValue)
+  {
+    int numBytes = getNumBytesForMax(maxValue);
+
+    final ByteBuffer buffer = ByteBuffer.allocate((list.size() * numBytes));
+    writeToBuffer(buffer, list, numBytes, maxValue);
+
+    return buffer.array();
+  }
+
   public static VSizeIndexedInts fromList(List<Integer> list, int maxValue)
   {
     int numBytes = getNumBytesForMax(maxValue);
 
     final ByteBuffer buffer = ByteBuffer.allocate((list.size() * numBytes) + (4 - numBytes));
+    writeToBuffer(buffer, list, numBytes, maxValue);
+
+    return new VSizeIndexedInts(buffer.asReadOnlyBuffer(), numBytes);
+  }
+
+  private static void writeToBuffer(ByteBuffer buffer, List<Integer> list, int numBytes, int maxValue)
+  {
     int i = 0;
     for (Integer val : list) {
       if (val < 0) {
@@ -57,14 +83,12 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
       if (val > maxValue) {
         throw new IAE("val[%d] > maxValue[%d], please don't lie about maxValue.  i[%d]", val, maxValue, i);
       }
-      
+
       byte[] intAsBytes = Ints.toByteArray(val);
       buffer.put(intAsBytes, intAsBytes.length - numBytes, numBytes);
       ++i;
     }
     buffer.position(0);
-
-    return new VSizeIndexedInts(buffer.asReadOnlyBuffer(), numBytes);
   }
 
   public static byte getNumBytesForMax(int maxValue)
@@ -138,8 +162,8 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
     if (retVal == 0) {
       retVal = buffer.compareTo(o.buffer);
     }
-    
-    return retVal;    
+
+    return retVal;
   }
 
   public int getNumBytes()
@@ -147,8 +171,9 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
     return numBytes;
   }
 
-  public int getSerializedSize()
+  public long getSerializedSize()
   {
+    // version, numBytes, size, remaining
     return 1 + 1 + 4 + buffer.remaining();
   }
 
@@ -160,7 +185,7 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
 
   public void writeToChannel(WritableByteChannel channel) throws IOException
   {
-    channel.write(ByteBuffer.wrap(new byte[]{version, (byte) numBytes}));
+    channel.write(ByteBuffer.wrap(new byte[]{VERSION, (byte) numBytes}));
     channel.write(ByteBuffer.wrap(Ints.toByteArray(buffer.remaining())));
     channel.write(buffer.asReadOnlyBuffer());
   }
@@ -169,7 +194,7 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
   {
     byte versionFromBuffer = buffer.get();
 
-    if (version == versionFromBuffer) {
+    if (VERSION == versionFromBuffer) {
       int numBytes = buffer.get();
       int size = buffer.getInt();
       ByteBuffer bufferToUse = buffer.asReadOnlyBuffer();
@@ -185,4 +210,45 @@ public class VSizeIndexedInts implements IndexedInts, Comparable<VSizeIndexedInt
     throw new IAE("Unknown version[%s]", versionFromBuffer);
   }
 
+  @Override
+  public void fill(int index, int[] toFill)
+  {
+    throw new UnsupportedOperationException("fill not supported");
+  }
+
+  @Override
+  public void close() throws IOException
+  {
+
+  }
+
+  public WritableSupplier<IndexedInts> asWritableSupplier() {
+    return new VSizeIndexedIntsSupplier(this);
+  }
+
+  public static class VSizeIndexedIntsSupplier implements WritableSupplier<IndexedInts> {
+    final VSizeIndexedInts delegate;
+
+    public VSizeIndexedIntsSupplier(VSizeIndexedInts delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public long getSerializedSize()
+    {
+      return delegate.getSerializedSize();
+    }
+
+    @Override
+    public void writeToChannel(WritableByteChannel channel) throws IOException
+    {
+      delegate.writeToChannel(channel);
+    }
+
+    @Override
+    public IndexedInts get()
+    {
+      return delegate;
+    }
+  }
 }

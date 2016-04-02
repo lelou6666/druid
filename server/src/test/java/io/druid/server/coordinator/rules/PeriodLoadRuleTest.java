@@ -1,24 +1,28 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.coordinator.rules;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableMap;
+import io.druid.client.DruidServer;
+import io.druid.jackson.DefaultObjectMapper;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.partition.NoneShardSpec;
 import org.joda.time.DateTime;
@@ -42,9 +46,7 @@ public class PeriodLoadRuleTest
     DateTime now = new DateTime("2013-01-01");
     PeriodLoadRule rule = new PeriodLoadRule(
         new Period("P5000Y"),
-        null,
-        0,
-        ""
+        ImmutableMap.<String, Integer>of("", 0)
     );
 
     Assert.assertTrue(rule.appliesTo(builder.interval(new Interval("2012-01-01/2012-12-31")).build(), now));
@@ -58,9 +60,7 @@ public class PeriodLoadRuleTest
     DateTime now = new DateTime("2012-12-31T01:00:00");
     PeriodLoadRule rule = new PeriodLoadRule(
         new Period("P1M"),
-        null,
-        0,
-        ""
+        ImmutableMap.<String, Integer>of("", 0)
     );
 
     Assert.assertTrue(rule.appliesTo(builder.interval(new Interval(now.minusWeeks(1), now)).build(), now));
@@ -78,5 +78,40 @@ public class PeriodLoadRuleTest
             now
         )
     );
+  }
+
+  @Test
+  public void testSerdeNullTieredReplicants() throws Exception
+  {
+    PeriodLoadRule rule = new PeriodLoadRule(
+        new Period("P1D"), null
+    );
+
+    ObjectMapper jsonMapper = new DefaultObjectMapper();
+    Rule reread = jsonMapper.readValue(jsonMapper.writeValueAsString(rule), Rule.class);
+
+    Assert.assertEquals(rule.getPeriod(), ((PeriodLoadRule)reread).getPeriod());
+    Assert.assertEquals(rule.getTieredReplicants(), ((PeriodLoadRule)reread).getTieredReplicants());
+    Assert.assertEquals(ImmutableMap.of(DruidServer.DEFAULT_TIER, DruidServer.DEFAULT_NUM_REPLICANTS), rule.getTieredReplicants());
+  }
+
+  @Test
+  public void testMappingNullTieredReplicants() throws Exception{
+    String inputJson = "{\n"
+                       + "      \"period\": \"P1D\",\n"
+                       + "      \"type\": \"loadByPeriod\"\n"
+                       + "    }";
+    String expectedJson = "{\n"
+                          + "      \"period\": \"P1D\",\n"
+                          + "      \"tieredReplicants\": {\n"
+                          + "        \""+ DruidServer.DEFAULT_TIER +"\": "+ DruidServer.DEFAULT_NUM_REPLICANTS +"\n"
+                          + "      },\n"
+                          + "      \"type\": \"loadByPeriod\"\n"
+                          + "    }";
+    ObjectMapper jsonMapper = new DefaultObjectMapper();
+    PeriodLoadRule inputPeriodLoadRule = jsonMapper.readValue(inputJson, PeriodLoadRule.class);
+    PeriodLoadRule expectedPeriodLoadRule = jsonMapper.readValue(expectedJson, PeriodLoadRule.class);
+    Assert.assertEquals(expectedPeriodLoadRule.getTieredReplicants(), inputPeriodLoadRule.getTieredReplicants());
+    Assert.assertEquals(expectedPeriodLoadRule.getPeriod(), inputPeriodLoadRule.getPeriod());
   }
 }

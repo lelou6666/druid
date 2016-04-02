@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.indexing.granularity;
@@ -35,8 +35,8 @@ import java.util.SortedSet;
 
 public class UniformGranularitySpec implements GranularitySpec
 {
-  private static final Granularity defaultSegmentGranularity = Granularity.DAY;
-  private static final QueryGranularity defaultQueryGranularity = QueryGranularity.NONE;
+  private static final Granularity DEFAULT_SEGMENT_GRANULARITY = Granularity.DAY;
+  private static final QueryGranularity DEFAULT_QUERY_GRANULARITY = QueryGranularity.NONE;
 
   private final Granularity segmentGranularity;
   private final QueryGranularity queryGranularity;
@@ -47,20 +47,12 @@ public class UniformGranularitySpec implements GranularitySpec
   public UniformGranularitySpec(
       @JsonProperty("segmentGranularity") Granularity segmentGranularity,
       @JsonProperty("queryGranularity") QueryGranularity queryGranularity,
-      @JsonProperty("intervals") List<Interval> inputIntervals,
-      // Backwards compatible
-      @JsonProperty("gran") Granularity granularity
+      @JsonProperty("intervals") List<Interval> inputIntervals
 
   )
   {
-    if (segmentGranularity != null) {
-      this.segmentGranularity = segmentGranularity;
-    } else if (granularity != null) { // backwards compatibility
-      this.segmentGranularity = granularity;
-    } else {
-      this.segmentGranularity = defaultSegmentGranularity;
-    }
-    this.queryGranularity = queryGranularity == null ? defaultQueryGranularity : queryGranularity;
+    this.segmentGranularity = segmentGranularity == null ? DEFAULT_SEGMENT_GRANULARITY : segmentGranularity;
+    this.queryGranularity = queryGranularity == null ? DEFAULT_QUERY_GRANULARITY : queryGranularity;
 
     if (inputIntervals != null) {
       List<Interval> granularIntervals = Lists.newArrayList();
@@ -68,7 +60,7 @@ public class UniformGranularitySpec implements GranularitySpec
         Iterables.addAll(granularIntervals, this.segmentGranularity.getIterable(inputInterval));
       }
       this.inputIntervals = ImmutableList.copyOf(inputIntervals);
-      this.wrappedSpec = new ArbitraryGranularitySpec(granularIntervals);
+      this.wrappedSpec = new ArbitraryGranularitySpec(queryGranularity, granularIntervals);
     } else {
       this.inputIntervals = null;
       this.wrappedSpec = null;
@@ -105,20 +97,44 @@ public class UniformGranularitySpec implements GranularitySpec
     return queryGranularity;
   }
 
-  @Override
-  public GranularitySpec withQueryGranularity(QueryGranularity queryGranularity)
-  {
-    return new UniformGranularitySpec(
-        segmentGranularity,
-        queryGranularity,
-        inputIntervals,
-        segmentGranularity
-    );
-  }
-
   @JsonProperty("intervals")
   public Optional<List<Interval>> getIntervals()
   {
     return Optional.fromNullable(inputIntervals);
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+
+    UniformGranularitySpec that = (UniformGranularitySpec) o;
+
+    if (segmentGranularity != that.segmentGranularity) {
+      return false;
+    }
+    if (!queryGranularity.equals(that.queryGranularity)) {
+      return false;
+    }
+    if (inputIntervals != null ? !inputIntervals.equals(that.inputIntervals) : that.inputIntervals != null) {
+      return false;
+    }
+    return !(wrappedSpec != null ? !wrappedSpec.equals(that.wrappedSpec) : that.wrappedSpec != null);
+
+  }
+
+  @Override
+  public int hashCode()
+  {
+    int result = segmentGranularity.hashCode();
+    result = 31 * result + queryGranularity.hashCode();
+    result = 31 * result + (inputIntervals != null ? inputIntervals.hashCode() : 0);
+    result = 31 * result + (wrappedSpec != null ? wrappedSpec.hashCode() : 0);
+    return result;
   }
 }

@@ -1,28 +1,32 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Lists;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
+import io.druid.data.input.Row;
+import io.druid.jackson.DefaultObjectMapper;
 import io.druid.query.Result;
+import io.druid.segment.column.ColumnConfig;
 import org.junit.Assert;
 
 import java.util.Iterator;
@@ -31,6 +35,57 @@ import java.util.Iterator;
  */
 public class TestHelper
 {
+  private static final IndexMerger INDEX_MERGER;
+  private static final IndexMergerV9 INDEX_MERGER_V9;
+  private static final IndexIO INDEX_IO;
+  public static final ObjectMapper JSON_MAPPER;
+
+  static {
+    JSON_MAPPER = new DefaultObjectMapper();
+    INDEX_IO = new IndexIO(
+        JSON_MAPPER,
+        new ColumnConfig()
+        {
+          @Override
+          public int columnCacheSizeBytes()
+          {
+            return 0;
+          }
+        }
+    );
+    INDEX_MERGER = new IndexMerger(JSON_MAPPER, INDEX_IO);
+    INDEX_MERGER_V9 = new IndexMergerV9(JSON_MAPPER, INDEX_IO);
+  }
+
+  public static ObjectMapper getTestObjectMapper()
+  {
+    return JSON_MAPPER;
+  }
+
+
+  public static IndexMerger getTestIndexMerger()
+  {
+    return INDEX_MERGER;
+  }
+
+  public static IndexMergerV9 getTestIndexMergerV9()
+  {
+    return INDEX_MERGER_V9;
+  }
+
+  public static IndexIO getTestIndexIO()
+  {
+    return INDEX_IO;
+  }
+
+  public static ObjectMapper getObjectMapper() {
+    return JSON_MAPPER;
+  }
+
+  public static <T> Iterable<T> revert(Iterable<T> input) {
+    return Lists.reverse(Lists.newArrayList(input));
+  }
+
   public static <T> void assertExpectedResults(Iterable<Result<T>> expectedResults, Sequence<Result<T>> results)
   {
     assertResults(expectedResults, Sequences.toList(results, Lists.<Result<T>>newArrayList()), "");
@@ -41,7 +96,11 @@ public class TestHelper
     assertResults(expectedResults, results, "");
   }
 
-  public static <T> void assertExpectedResults(Iterable<Result<T>> expectedResults, Iterable<Result<T>> results, String failMsg)
+  public static <T> void assertExpectedResults(
+      Iterable<Result<T>> expectedResults,
+      Iterable<Result<T>> results,
+      String failMsg
+  )
   {
     assertResults(expectedResults, results, failMsg);
   }
@@ -56,23 +115,33 @@ public class TestHelper
     assertObjects(expectedResults, Sequences.toList(results, Lists.<T>newArrayList()), failMsg);
   }
 
-  private static <T> void assertResults(Iterable<Result<T>> expectedResults, Iterable<Result<T>> actualResults, String failMsg)
+  private static <T> void assertResults(
+      Iterable<Result<T>> expectedResults,
+      Iterable<Result<T>> actualResults,
+      String failMsg
+  )
   {
     Iterator<? extends Result> resultsIter = actualResults.iterator();
     Iterator<? extends Result> resultsIter2 = actualResults.iterator();
     Iterator<? extends Result> expectedResultsIter = expectedResults.iterator();
 
     while (resultsIter.hasNext() && resultsIter2.hasNext() && expectedResultsIter.hasNext()) {
-      Result expectedNext = expectedResultsIter.next();
-      final Result next = resultsIter.next();
-      final Result next2 = resultsIter2.next();
+      Object expectedNext = expectedResultsIter.next();
+      final Object next = resultsIter.next();
+      final Object next2 = resultsIter2.next();
 
-      assertResult(failMsg, expectedNext, next);
-      assertResult(
-          String.format("%s: Second iterator bad, multiple calls to iterator() should be safe", failMsg),
-          expectedNext,
-          next2
-      );
+      if (expectedNext instanceof Row) {
+        // HACK! Special casing for groupBy
+        Assert.assertEquals(failMsg, expectedNext, next);
+        Assert.assertEquals(failMsg, expectedNext, next2);
+      } else {
+        assertResult(failMsg, (Result) expectedNext, (Result) next);
+        assertResult(
+            String.format("%s: Second iterator bad, multiple calls to iterator() should be safe", failMsg),
+            (Result) expectedNext,
+            (Result) next2
+        );
+      }
     }
 
     if (resultsIter.hasNext()) {
@@ -90,23 +159,27 @@ public class TestHelper
     if (expectedResultsIter.hasNext()) {
       Assert.fail(
           String.format(
-              "%s: Expected expectedResultsIter to be exhausted, next element was %s", failMsg, expectedResultsIter.next()
+              "%s: Expected expectedResultsIter to be exhausted, next element was %s",
+              failMsg,
+              expectedResultsIter.next()
           )
       );
     }
   }
 
-  private static <T> void assertObjects(Iterable<T> expectedResults, Iterable<T> actualResults, String failMsg)
+  private static <T> void assertObjects(Iterable<T> expectedResults, Iterable<T> actualResults, String msg)
   {
     Iterator resultsIter = actualResults.iterator();
     Iterator resultsIter2 = actualResults.iterator();
     Iterator expectedResultsIter = expectedResults.iterator();
 
+    int index = 0;
     while (resultsIter.hasNext() && resultsIter2.hasNext() && expectedResultsIter.hasNext()) {
       Object expectedNext = expectedResultsIter.next();
       final Object next = resultsIter.next();
       final Object next2 = resultsIter2.next();
 
+      String failMsg = msg + "-" + index++;
       Assert.assertEquals(failMsg, expectedNext, next);
       Assert.assertEquals(
           String.format("%s: Second iterator bad, multiple calls to iterator() should be safe", failMsg),
@@ -117,20 +190,22 @@ public class TestHelper
 
     if (resultsIter.hasNext()) {
       Assert.fail(
-          String.format("%s: Expected resultsIter to be exhausted, next element was %s", failMsg, resultsIter.next())
+          String.format("%s: Expected resultsIter to be exhausted, next element was %s", msg, resultsIter.next())
       );
     }
 
     if (resultsIter2.hasNext()) {
       Assert.fail(
-          String.format("%s: Expected resultsIter2 to be exhausted, next element was %s", failMsg, resultsIter.next())
+          String.format("%s: Expected resultsIter2 to be exhausted, next element was %s", msg, resultsIter.next())
       );
     }
 
     if (expectedResultsIter.hasNext()) {
       Assert.fail(
           String.format(
-              "%s: Expected expectedResultsIter to be exhausted, next element was %s", failMsg, expectedResultsIter.next()
+              "%s: Expected expectedResultsIter to be exhausted, next element was %s",
+              msg,
+              expectedResultsIter.next()
           )
       );
     }

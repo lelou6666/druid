@@ -1,28 +1,32 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.granularity;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.google.common.collect.ImmutableMap;
 import com.metamx.common.IAE;
 import org.joda.time.DateTime;
+import org.joda.time.Period;
 import org.joda.time.ReadableDuration;
+
+import java.util.Map;
 
 public abstract class QueryGranularity
 {
@@ -39,10 +43,22 @@ public abstract class QueryGranularity
   public static final QueryGranularity ALL = new AllGranularity();
   public static final QueryGranularity NONE = new NoneGranularity();
 
+  private static final Map<String, PeriodGranularity> CALENDRIC_GRANULARITIES = ImmutableMap.of(
+      "YEAR", new PeriodGranularity(new Period("P1Y"), null, null),
+      "MONTH", new PeriodGranularity(new Period("P1M"), null, null),
+      "QUARTER", new PeriodGranularity(new Period("P3M"), null, null),
+      "WEEK", new PeriodGranularity(new Period("P1W"), null, null)
+  );
+
   public static final QueryGranularity MINUTE = fromString("MINUTE");
   public static final QueryGranularity HOUR   = fromString("HOUR");
   public static final QueryGranularity DAY    = fromString("DAY");
   public static final QueryGranularity SECOND = fromString("SECOND");
+
+  public static final QueryGranularity WEEK     = fromString("WEEK");
+  public static final QueryGranularity MONTH    = fromString("MONTH");
+  public static final QueryGranularity QUARTER  = fromString("QUARTER");
+  public static final QueryGranularity YEAR     = fromString("YEAR");
 
   @JsonCreator
   public static QueryGranularity fromString(String str)
@@ -55,6 +71,10 @@ public abstract class QueryGranularity
     else if(name.equals("NONE"))
     {
       return QueryGranularity.NONE;
+    }
+    else if(CALENDRIC_GRANULARITIES.containsKey(name))
+    {
+      return CALENDRIC_GRANULARITIES.get(name);
     }
     return new DurationGranularity(convertValue(str), 0);
   }

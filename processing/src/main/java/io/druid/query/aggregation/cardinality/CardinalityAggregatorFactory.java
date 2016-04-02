@@ -1,37 +1,40 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013, 2014  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.aggregation.cardinality;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Charsets;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import com.metamx.common.StringUtils;
 import io.druid.query.aggregation.Aggregator;
 import io.druid.query.aggregation.AggregatorFactory;
+import io.druid.query.aggregation.AggregatorFactoryNotMergeableException;
 import io.druid.query.aggregation.Aggregators;
 import io.druid.query.aggregation.BufferAggregator;
 import io.druid.query.aggregation.hyperloglog.HyperLogLogCollector;
+import io.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
+import io.druid.query.dimension.DefaultDimensionSpec;
 import io.druid.segment.ColumnSelectorFactory;
 import io.druid.segment.DimensionSelector;
 import org.apache.commons.codec.binary.Base64;
@@ -41,7 +44,7 @@ import java.nio.ByteBuffer;
 import java.util.Comparator;
 import java.util.List;
 
-public class CardinalityAggregatorFactory implements AggregatorFactory
+public class CardinalityAggregatorFactory extends AggregatorFactory
 {
   public static Object estimateCardinality(Object object)
   {
@@ -62,12 +65,12 @@ public class CardinalityAggregatorFactory implements AggregatorFactory
   public CardinalityAggregatorFactory(
       @JsonProperty("name") String name,
       @JsonProperty("fieldNames") final List<String> fieldNames,
-      @JsonProperty("byRow") final Boolean byRow
+      @JsonProperty("byRow") final boolean byRow
   )
   {
     this.name = name;
     this.fieldNames = fieldNames;
-    this.byRow = byRow == null ? false : byRow;
+    this.byRow = byRow;
   }
 
   @Override
@@ -106,7 +109,7 @@ public class CardinalityAggregatorFactory implements AggregatorFactory
               @Override
               public DimensionSelector apply(@Nullable String input)
               {
-                return columnFactory.makeDimensionSelector(input);
+                return columnFactory.makeDimensionSelector(new DefaultDimensionSpec(input, input));
               }
             }
             ), Predicates.notNull()
@@ -142,7 +145,29 @@ public class CardinalityAggregatorFactory implements AggregatorFactory
   @Override
   public AggregatorFactory getCombiningFactory()
   {
-    return new CardinalityAggregatorFactory(name, fieldNames, byRow);
+    return new HyperUniquesAggregatorFactory(name, name);
+  }
+
+  @Override
+  public AggregatorFactory getMergingFactory(AggregatorFactory other) throws AggregatorFactoryNotMergeableException
+  {
+    throw new UnsupportedOperationException("can't merge CardinalityAggregatorFactory");
+  }
+
+  @Override
+  public List<AggregatorFactory> getRequiredColumns()
+  {
+    return Lists.transform(
+        fieldNames,
+        new Function<String, AggregatorFactory>()
+        {
+          @Override
+          public AggregatorFactory apply(String input)
+          {
+            return new CardinalityAggregatorFactory(input, fieldNames, byRow);
+          }
+        }
+    );
   }
 
   @Override
@@ -154,7 +179,7 @@ public class CardinalityAggregatorFactory implements AggregatorFactory
       return HyperLogLogCollector.makeCollector((ByteBuffer) object);
     } else if (object instanceof String) {
       return HyperLogLogCollector.makeCollector(
-          ByteBuffer.wrap(Base64.decodeBase64(((String) object).getBytes(Charsets.UTF_8)))
+          ByteBuffer.wrap(Base64.decodeBase64(StringUtils.toUtf8((String) object)))
       );
     }
     return object;
@@ -186,14 +211,21 @@ public class CardinalityAggregatorFactory implements AggregatorFactory
     return fieldNames;
   }
 
+  @JsonProperty
+  public boolean isByRow()
+  {
+    return byRow;
+  }
+
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = Joiner.on("\u0001").join(fieldNames).getBytes(Charsets.UTF_8);
+    byte[] fieldNameBytes = StringUtils.toUtf8(Joiner.on("\u0001").join(fieldNames));
 
-    return ByteBuffer.allocate(1 + fieldNameBytes.length)
+    return ByteBuffer.allocate(2 + fieldNameBytes.length)
                      .put(CACHE_TYPE_ID)
                      .put(fieldNameBytes)
+                     .put((byte)(byRow ? 1 : 0))
                      .array();
   }
 
@@ -213,6 +245,40 @@ public class CardinalityAggregatorFactory implements AggregatorFactory
   public Object getAggregatorStartValue()
   {
     return HyperLogLogCollector.makeLatestCollector();
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+
+    CardinalityAggregatorFactory that = (CardinalityAggregatorFactory) o;
+
+    if (byRow != that.byRow) {
+      return false;
+    }
+    if (fieldNames != null ? !fieldNames.equals(that.fieldNames) : that.fieldNames != null) {
+      return false;
+    }
+    if (name != null ? !name.equals(that.name) : that.name != null) {
+      return false;
+    }
+
+    return true;
+  }
+
+  @Override
+  public int hashCode()
+  {
+    int result = name != null ? name.hashCode() : 0;
+    result = 31 * result + (fieldNames != null ? fieldNames.hashCode() : 0);
+    result = 31 * result + (byRow ? 1 : 0);
+    return result;
   }
 
   @Override

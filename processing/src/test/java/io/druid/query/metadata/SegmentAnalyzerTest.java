@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.metadata;
@@ -34,9 +34,11 @@ import io.druid.segment.QueryableIndexSegment;
 import io.druid.segment.Segment;
 import io.druid.segment.TestIndex;
 import io.druid.segment.column.ValueType;
-import junit.framework.Assert;
+import org.junit.Assert;
 import org.junit.Test;
 
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -44,21 +46,72 @@ import java.util.Map;
  */
 public class SegmentAnalyzerTest
 {
+  private static final EnumSet<SegmentMetadataQuery.AnalysisType> emptyAnalyses =
+      EnumSet.noneOf(SegmentMetadataQuery.AnalysisType.class);
+
   @Test
-  public void testIncrementalDoesNotWork() throws Exception
+  public void testIncrementalWorks() throws Exception
+  {
+    testIncrementalWorksHelper(null);
+    testIncrementalWorksHelper(emptyAnalyses);
+  }
+
+  private void testIncrementalWorksHelper(EnumSet<SegmentMetadataQuery.AnalysisType> analyses) throws Exception
   {
     final List<SegmentAnalysis> results = getSegmentAnalysises(
-        new IncrementalIndexSegment(TestIndex.getIncrementalTestIndex(), null)
+        new IncrementalIndexSegment(TestIndex.getIncrementalTestIndex(), null),
+        analyses
     );
 
-    Assert.assertEquals(0, results.size());
+    Assert.assertEquals(1, results.size());
+
+    final SegmentAnalysis analysis = results.get(0);
+    Assert.assertEquals(null, analysis.getId());
+
+    final Map<String, ColumnAnalysis> columns = analysis.getColumns();
+
+    Assert.assertEquals(
+        TestIndex.COLUMNS.length,
+        columns.size()
+    ); // All columns including time and empty/null column
+
+    for (String dimension : TestIndex.DIMENSIONS) {
+      final ColumnAnalysis columnAnalysis = columns.get(dimension);
+
+      Assert.assertEquals(dimension, ValueType.STRING.name(), columnAnalysis.getType());
+      if (analyses == null) {
+        Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+      } else {
+        Assert.assertEquals(dimension, 0, columnAnalysis.getCardinality().longValue());
+        Assert.assertEquals(dimension, 0, columnAnalysis.getSize());
+      }
+    }
+
+    for (String metric : TestIndex.METRICS) {
+      final ColumnAnalysis columnAnalysis = columns.get(metric);
+
+      Assert.assertEquals(metric, ValueType.FLOAT.name(), columnAnalysis.getType());
+      if (analyses == null) {
+        Assert.assertTrue(metric, columnAnalysis.getSize() > 0);
+      } else {
+        Assert.assertEquals(metric, 0, columnAnalysis.getSize());
+      }
+      Assert.assertNull(metric, columnAnalysis.getCardinality());
+    }
   }
 
   @Test
   public void testMappedWorks() throws Exception
   {
+    testMappedWorksHelper(null);
+    testMappedWorksHelper(emptyAnalyses);
+  }
+
+  private void testMappedWorksHelper(EnumSet<SegmentMetadataQuery.AnalysisType> analyses) throws Exception
+  {
     final List<SegmentAnalysis> results = getSegmentAnalysises(
-        new QueryableIndexSegment("test_1", TestIndex.getMMappedTestIndex())
+        new QueryableIndexSegment("test_1", TestIndex.getMMappedTestIndex()),
+        analyses
     );
 
     Assert.assertEquals(1, results.size());
@@ -66,22 +119,37 @@ public class SegmentAnalyzerTest
     final SegmentAnalysis analysis = results.get(0);
     Assert.assertEquals("test_1", analysis.getId());
 
-    final Map<String,ColumnAnalysis> columns = analysis.getColumns();
-    Assert.assertEquals(TestIndex.COLUMNS.length, columns.size()); // All columns including time
+    final Map<String, ColumnAnalysis> columns = analysis.getColumns();
+    Assert.assertEquals(
+        TestIndex.COLUMNS.length - 1,
+        columns.size()
+    ); // All columns including time and excluding empty/null column
 
     for (String dimension : TestIndex.DIMENSIONS) {
-      final ColumnAnalysis columnAnalysis = columns.get(dimension.toLowerCase());
-
-      Assert.assertEquals(dimension, ValueType.STRING.name(), columnAnalysis.getType());
-      Assert.assertTrue(dimension, columnAnalysis.getSize() > 0);
-      Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+      final ColumnAnalysis columnAnalysis = columns.get(dimension);
+      if (dimension.equals("null_column")) {
+        Assert.assertNull(columnAnalysis);
+      } else {
+        Assert.assertEquals(dimension, ValueType.STRING.name(), columnAnalysis.getType());
+        if (analyses == null) {
+          Assert.assertTrue(dimension, columnAnalysis.getSize() > 0);
+          Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+        } else {
+          Assert.assertEquals(dimension, 0, columnAnalysis.getCardinality().longValue());
+          Assert.assertEquals(dimension, 0, columnAnalysis.getSize());
+        }
+      }
     }
 
     for (String metric : TestIndex.METRICS) {
-      final ColumnAnalysis columnAnalysis = columns.get(metric.toLowerCase());
+      final ColumnAnalysis columnAnalysis = columns.get(metric);
 
       Assert.assertEquals(metric, ValueType.FLOAT.name(), columnAnalysis.getType());
-      Assert.assertTrue(metric, columnAnalysis.getSize() > 0);
+      if (analyses == null) {
+        Assert.assertTrue(metric, columnAnalysis.getSize() > 0);
+      } else {
+        Assert.assertEquals(metric, 0, columnAnalysis.getSize());
+      }
       Assert.assertNull(metric, columnAnalysis.getCardinality());
     }
   }
@@ -90,17 +158,22 @@ public class SegmentAnalyzerTest
    * *Awesome* method name auto-generated by IntelliJ!  I love IntelliJ!
    *
    * @param index
+   *
    * @return
    */
-  private List<SegmentAnalysis> getSegmentAnalysises(Segment index)
+  private List<SegmentAnalysis> getSegmentAnalysises(Segment index, EnumSet<SegmentMetadataQuery.AnalysisType> analyses)
   {
     final QueryRunner runner = QueryRunnerTestHelper.makeQueryRunner(
-        (QueryRunnerFactory) new SegmentMetadataQueryRunnerFactory(), index
+        (QueryRunnerFactory) new SegmentMetadataQueryRunnerFactory(
+            new SegmentMetadataQueryQueryToolChest(new SegmentMetadataQueryConfig()),
+            QueryRunnerTestHelper.NOOP_QUERYWATCHER
+        ), index
     );
 
     final SegmentMetadataQuery query = new SegmentMetadataQuery(
-        new LegacyDataSource("test"), QuerySegmentSpecs.create("2011/2012"), null, null, null
+        new LegacyDataSource("test"), QuerySegmentSpecs.create("2011/2012"), null, null, null, analyses, false, false
     );
-    return Sequences.toList(query.run(runner), Lists.<SegmentAnalysis>newArrayList());
+    HashMap<String, Object> context = new HashMap<String, Object>();
+    return Sequences.toList(query.run(runner, context), Lists.<SegmentAnalysis>newArrayList());
   }
 }

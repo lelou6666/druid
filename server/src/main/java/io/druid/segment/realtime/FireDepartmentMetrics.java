@@ -1,23 +1,25 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.realtime;
+
+import com.google.common.base.Preconditions;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -29,6 +31,15 @@ public class FireDepartmentMetrics
   private final AtomicLong thrownAwayCount = new AtomicLong(0);
   private final AtomicLong unparseableCount = new AtomicLong(0);
   private final AtomicLong rowOutputCount = new AtomicLong(0);
+  private final AtomicLong numPersists = new AtomicLong(0);
+  private final AtomicLong persistTimeMillis = new AtomicLong(0);
+  private final AtomicLong persistBackPressureMillis = new AtomicLong(0);
+  private final AtomicLong failedPersists = new AtomicLong(0);
+  private final AtomicLong failedHandoffs = new AtomicLong(0);
+  private final AtomicLong mergeTimeMillis = new AtomicLong(0);
+  private final AtomicLong mergeCpuTime = new AtomicLong(0);
+  private final AtomicLong persistCpuTime = new AtomicLong(0);
+  private final AtomicLong handOffCount = new AtomicLong(0);
 
   public void incrementProcessed()
   {
@@ -48,6 +59,48 @@ public class FireDepartmentMetrics
   public void incrementRowOutputCount(long numRows)
   {
     rowOutputCount.addAndGet(numRows);
+  }
+
+  public void incrementNumPersists()
+  {
+    numPersists.incrementAndGet();
+  }
+
+  public void incrementPersistTimeMillis(long millis)
+  {
+    persistTimeMillis.addAndGet(millis);
+  }
+
+  public void incrementPersistBackPressureMillis(long millis)
+  {
+    persistBackPressureMillis.addAndGet(millis);
+  }
+
+  public void incrementFailedPersists()
+  {
+    failedPersists.incrementAndGet();
+  }
+
+  public void incrementFailedHandoffs()
+  {
+    failedHandoffs.incrementAndGet();
+  }
+
+  public void incrementMergeTimeMillis(long millis)
+  {
+    mergeTimeMillis.addAndGet(millis);
+  }
+
+  public void incrementMergeCpuTime(long mergeTime){
+    mergeCpuTime.addAndGet(mergeTime);
+  }
+
+  public void incrementPersistCpuTime(long persistTime){
+    persistCpuTime.addAndGet(persistTime);
+  }
+
+  public void incrementHandOffCount(){
+    handOffCount.incrementAndGet();
   }
 
   public long processed()
@@ -70,6 +123,52 @@ public class FireDepartmentMetrics
     return rowOutputCount.get();
   }
 
+  public long numPersists()
+  {
+    return numPersists.get();
+  }
+
+  public long persistTimeMillis()
+  {
+    return persistTimeMillis.get();
+  }
+
+  public long persistBackPressureMillis()
+  {
+    return persistBackPressureMillis.get();
+  }
+
+  public long failedPersists()
+  {
+    return failedPersists.get();
+  }
+
+  public long failedHandoffs()
+  {
+    return failedHandoffs.get();
+  }
+
+  public long mergeTimeMillis()
+  {
+    return mergeTimeMillis.get();
+  }
+
+  public long mergeCpuTime()
+  {
+    return mergeCpuTime.get();
+  }
+
+  public long persistCpuTime()
+  {
+    return persistCpuTime.get();
+  }
+
+  public long handOffCount()
+  {
+    return handOffCount.get();
+  }
+
+
   public FireDepartmentMetrics snapshot()
   {
     final FireDepartmentMetrics retVal = new FireDepartmentMetrics();
@@ -77,6 +176,41 @@ public class FireDepartmentMetrics
     retVal.thrownAwayCount.set(thrownAwayCount.get());
     retVal.unparseableCount.set(unparseableCount.get());
     retVal.rowOutputCount.set(rowOutputCount.get());
+    retVal.numPersists.set(numPersists.get());
+    retVal.persistTimeMillis.set(persistTimeMillis.get());
+    retVal.persistBackPressureMillis.set(persistBackPressureMillis.get());
+    retVal.failedPersists.set(failedPersists.get());
+    retVal.failedHandoffs.set(failedHandoffs.get());
+    retVal.mergeTimeMillis.set(mergeTimeMillis.get());
+    retVal.mergeCpuTime.set(mergeCpuTime.get());
+    retVal.persistCpuTime.set(persistCpuTime.get());
+    retVal.handOffCount.set(handOffCount.get());
     return retVal;
   }
+
+  /**
+   * merge other FireDepartmentMetrics, will modify this object's data
+   *
+   * @return this object
+   */
+  public FireDepartmentMetrics merge(FireDepartmentMetrics other)
+  {
+    Preconditions.checkNotNull(other, "Cannot merge a null FireDepartmentMetrics");
+    FireDepartmentMetrics otherSnapshot = other.snapshot();
+    processedCount.addAndGet(otherSnapshot.processed());
+    thrownAwayCount.addAndGet(otherSnapshot.thrownAway());
+    rowOutputCount.addAndGet(otherSnapshot.rowOutput());
+    unparseableCount.addAndGet(otherSnapshot.unparseable());
+    numPersists.addAndGet(otherSnapshot.numPersists());
+    persistTimeMillis.addAndGet(otherSnapshot.persistTimeMillis());
+    persistBackPressureMillis.addAndGet(otherSnapshot.persistBackPressureMillis());
+    failedPersists.addAndGet(otherSnapshot.failedPersists());
+    failedHandoffs.addAndGet(otherSnapshot.failedHandoffs());
+    mergeTimeMillis.addAndGet(otherSnapshot.mergeTimeMillis());
+    mergeCpuTime.addAndGet(otherSnapshot.mergeCpuTime());
+    persistCpuTime.addAndGet(otherSnapshot.persistCpuTime());
+    handOffCount.addAndGet(otherSnapshot.handOffCount());
+    return this;
+  }
+
 }

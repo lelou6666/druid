@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.http;
@@ -29,12 +29,12 @@ import io.druid.client.DruidServer;
 import io.druid.client.InventoryView;
 import io.druid.timeline.DataSegment;
 
-import javax.annotation.Nullable;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.util.Map;
 
@@ -55,6 +55,19 @@ public class ServersResource
         .build();
   }
 
+  private static Map<String, Object> makeFullServer(DruidServer input)
+  {
+    return new ImmutableMap.Builder<String, Object>()
+        .put("host", input.getHost())
+        .put("maxSize", input.getMaxSize())
+        .put("type", input.getType())
+        .put("tier", input.getTier())
+        .put("priority", input.getPriority())
+        .put("segments", input.getSegments())
+        .put("currSize", input.getCurrSize())
+        .build();
+  }
+
   private final InventoryView serverInventoryView;
 
   @Inject
@@ -66,7 +79,7 @@ public class ServersResource
   }
 
   @GET
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getClusterServers(
       @QueryParam("full") String full,
       @QueryParam("simple") String simple
@@ -75,7 +88,21 @@ public class ServersResource
     Response.ResponseBuilder builder = Response.status(Response.Status.OK);
 
     if (full != null) {
-      return builder.entity(Lists.newArrayList(serverInventoryView.getInventory())).build();
+      return builder.entity(
+          Lists.newArrayList(
+              Iterables.transform(
+                  serverInventoryView.getInventory(),
+                  new Function<DruidServer, Map<String, Object>>()
+                  {
+                    @Override
+                    public Map<String, Object> apply(DruidServer input)
+                    {
+                      return makeFullServer(input);
+                    }
+                  }
+              )
+          )
+      ).build();
     } else if (simple != null) {
       return builder.entity(
           Lists.newArrayList(
@@ -113,7 +140,7 @@ public class ServersResource
 
   @GET
   @Path("/{serverName}")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getServer(
       @PathParam("serverName") String serverName,
       @QueryParam("simple") String simple
@@ -130,13 +157,13 @@ public class ServersResource
       return builder.entity(makeSimpleServer(server)).build();
     }
 
-    return builder.entity(server)
+    return builder.entity(makeFullServer(server))
                   .build();
   }
 
   @GET
   @Path("/{serverName}/segments")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getServerSegments(
       @PathParam("serverName") String serverName,
       @QueryParam("full") String full
@@ -158,7 +185,7 @@ public class ServersResource
             new Function<DataSegment, String>()
             {
               @Override
-              public String apply(@Nullable DataSegment segment)
+              public String apply(DataSegment segment)
               {
                 return segment.getIdentifier();
               }
@@ -169,7 +196,7 @@ public class ServersResource
 
   @GET
   @Path("/{serverName}/segments/{segmentId}")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getServerSegment(
       @PathParam("serverName") String serverName,
       @PathParam("segmentId") String segmentId

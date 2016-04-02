@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.data.input;
@@ -28,26 +28,19 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
-import com.metamx.common.exception.FormattedException;
 import com.metamx.common.logger.Logger;
-import io.druid.data.input.impl.DimensionsSpec;
-import io.druid.data.input.impl.InputRowParser;
-import io.druid.data.input.impl.JSONParseSpec;
 import io.druid.data.input.impl.MapInputRowParser;
 import io.druid.data.input.impl.ParseSpec;
-import io.druid.data.input.impl.SpatialDimensionSchema;
-import io.druid.data.input.impl.TimestampSpec;
 
 import java.io.InputStream;
 import java.nio.ByteBuffer;
-import java.util.List;
 import java.util.Map;
 
 import static com.google.protobuf.DescriptorProtos.FileDescriptorSet;
 import static com.google.protobuf.Descriptors.Descriptor;
 import static com.google.protobuf.Descriptors.FileDescriptor;
 
-@JsonTypeName("protoBuf")
+@JsonTypeName("protobuf")
 public class ProtoBufInputRowParser implements ByteBufferInputRowParser
 {
   private static final Logger log = new Logger(ProtoBufInputRowParser.class);
@@ -59,26 +52,12 @@ public class ProtoBufInputRowParser implements ByteBufferInputRowParser
   @JsonCreator
   public ProtoBufInputRowParser(
       @JsonProperty("parseSpec") ParseSpec parseSpec,
-      @JsonProperty("descriptor") String descriptorFileInClasspath,
-      // Backwards compatible
-      @JsonProperty("timestampSpec") TimestampSpec timestampSpec,
-      @JsonProperty("dimensions") List<String> dimensions,
-      @JsonProperty("dimensionExclusions") List<String> dimensionExclusions,
-      @JsonProperty("spatialDimensions") List<SpatialDimensionSchema> spatialDimensions
+      @JsonProperty("descriptor") String descriptorFileInClasspath
   )
   {
-    // Backwards Compatible
-    if (parseSpec == null) {
-      this.parseSpec = new JSONParseSpec(
-          timestampSpec,
-          new DimensionsSpec(dimensions, dimensionExclusions, spatialDimensions)
-      );
-    } else {
-      this.parseSpec = parseSpec;
-    }
-
+    this.parseSpec = parseSpec;
     this.descriptorFileInClasspath = descriptorFileInClasspath;
-    this.mapParser = new MapInputRowParser(this.parseSpec, null, null, null, null);
+      this.mapParser = new MapInputRowParser(this.parseSpec);
   }
 
   @Override
@@ -90,11 +69,11 @@ public class ProtoBufInputRowParser implements ByteBufferInputRowParser
   @Override
   public ProtoBufInputRowParser withParseSpec(ParseSpec parseSpec)
   {
-    return new ProtoBufInputRowParser(parseSpec, descriptorFileInClasspath, null, null, null, null);
+    return new ProtoBufInputRowParser(parseSpec, descriptorFileInClasspath);
   }
 
   @Override
-  public InputRow parse(ByteBuffer input) throws FormattedException
+  public InputRow parse(ByteBuffer input)
   {
     // We should really create a ProtoBufBasedInputRow that does not need an intermediate map but accesses
     // the DynamicMessage directly...

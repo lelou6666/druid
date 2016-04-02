@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.realtime.plumber;
@@ -22,19 +22,22 @@ package io.druid.segment.realtime.plumber;
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
-import com.metamx.common.Granularity;
 import com.metamx.emitter.service.ServiceEmitter;
+import io.druid.client.cache.Cache;
+import io.druid.client.cache.CacheConfig;
 import io.druid.guice.annotations.Processing;
 import io.druid.query.QueryRunnerFactoryConglomerate;
+import io.druid.segment.IndexIO;
+import io.druid.segment.IndexMerger;
+import io.druid.segment.IndexMergerV9;
 import io.druid.segment.indexing.DataSchema;
 import io.druid.segment.indexing.RealtimeTuningConfig;
 import io.druid.segment.realtime.FireDepartmentMetrics;
 import io.druid.server.coordination.DataSegmentAnnouncer;
 import org.joda.time.Duration;
-import org.joda.time.Period;
 
-import java.io.File;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -51,6 +54,12 @@ public class FlushingPlumberSchool extends RealtimePlumberSchool
   private final QueryRunnerFactoryConglomerate conglomerate;
   private final DataSegmentAnnouncer segmentAnnouncer;
   private final ExecutorService queryExecutorService;
+  private final IndexMerger indexMerger;
+  private final IndexMergerV9 indexMergerV9;
+  private final IndexIO indexIO;
+  private final Cache cache;
+  private final CacheConfig cacheConfig;
+  private final ObjectMapper objectMapper;
 
   @JsonCreator
   public FlushingPlumberSchool(
@@ -59,13 +68,12 @@ public class FlushingPlumberSchool extends RealtimePlumberSchool
       @JacksonInject QueryRunnerFactoryConglomerate conglomerate,
       @JacksonInject DataSegmentAnnouncer segmentAnnouncer,
       @JacksonInject @Processing ExecutorService queryExecutorService,
-      // Backwards compatible
-      @JsonProperty("windowPeriod") Period windowPeriod,
-      @JsonProperty("basePersistDirectory") File basePersistDirectory,
-      @JsonProperty("segmentGranularity") Granularity segmentGranularity,
-      @JsonProperty("versioningPolicy") VersioningPolicy versioningPolicy,
-      @JsonProperty("rejectionPolicyFactory") RejectionPolicyFactory rejectionPolicyFactory,
-      @JsonProperty("maxPendingPersists") int maxPendingPersists
+      @JacksonInject IndexMerger indexMerger,
+      @JacksonInject IndexMergerV9 indexMergerV9,
+      @JacksonInject IndexIO indexIO,
+      @JacksonInject Cache cache,
+      @JacksonInject CacheConfig cacheConfig,
+      @JacksonInject ObjectMapper objectMapper
   )
   {
     super(
@@ -76,12 +84,12 @@ public class FlushingPlumberSchool extends RealtimePlumberSchool
         null,
         null,
         queryExecutorService,
-        windowPeriod,
-        basePersistDirectory,
-        segmentGranularity,
-        versioningPolicy,
-        rejectionPolicyFactory,
-        maxPendingPersists
+        indexMerger,
+        indexMergerV9,
+        indexIO,
+        cache,
+        cacheConfig,
+        objectMapper
     );
 
     this.flushDuration = flushDuration == null ? defaultFlushDuration : flushDuration;
@@ -89,6 +97,12 @@ public class FlushingPlumberSchool extends RealtimePlumberSchool
     this.conglomerate = conglomerate;
     this.segmentAnnouncer = segmentAnnouncer;
     this.queryExecutorService = queryExecutorService;
+    this.indexMerger = Preconditions.checkNotNull(indexMerger, "Null IndexMerger");
+    this.indexMergerV9 = Preconditions.checkNotNull(indexMergerV9, "Null IndexMergerV9");
+    this.indexIO = Preconditions.checkNotNull(indexIO, "Null IndexIO");
+    this.cache = cache;
+    this.cacheConfig = cacheConfig;
+    this.objectMapper = objectMapper;
   }
 
   @Override
@@ -108,7 +122,12 @@ public class FlushingPlumberSchool extends RealtimePlumberSchool
         emitter,
         conglomerate,
         segmentAnnouncer,
-        queryExecutorService
+        queryExecutorService,
+        config.getBuildV9Directly() ? indexMergerV9 : indexMerger,
+        indexIO,
+        cache,
+        cacheConfig,
+        objectMapper
     );
   }
 

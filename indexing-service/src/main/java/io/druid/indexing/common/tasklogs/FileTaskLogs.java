@@ -1,35 +1,33 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.common.tasklogs;
 
 import com.google.common.base.Optional;
-import com.google.common.io.ByteStreams;
+import com.google.common.io.ByteSource;
 import com.google.common.io.Files;
-import com.google.common.io.InputSupplier;
 import com.google.inject.Inject;
 import com.metamx.common.logger.Logger;
 import io.druid.indexing.common.config.FileTaskLogsConfig;
 import io.druid.tasklogs.TaskLogs;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -50,28 +48,27 @@ public class FileTaskLogs implements TaskLogs
   @Override
   public void pushTaskLog(final String taskid, File file) throws IOException
   {
-    if (!config.getDirectory().exists()) {
-      config.getDirectory().mkdir();
+    if (config.getDirectory().exists() || config.getDirectory().mkdirs()) {
+      final File outputFile = fileForTask(taskid);
+      Files.copy(file, outputFile);
+      log.info("Wrote task log to: %s", outputFile);
+    } else {
+      throw new IOException(String.format("Unable to create task log dir[%s]", config.getDirectory()));
     }
-    final File outputFile = fileForTask(taskid);
-    Files.copy(file, outputFile);
-    log.info("Wrote task log to: %s", outputFile);
   }
 
   @Override
-  public Optional<InputSupplier<InputStream>> streamTaskLog(final String taskid, final long offset) throws IOException
+  public Optional<ByteSource> streamTaskLog(final String taskid, final long offset) throws IOException
   {
     final File file = fileForTask(taskid);
     if (file.exists()) {
-      return Optional.<InputSupplier<InputStream>>of(
-          new InputSupplier<InputStream>()
+      return Optional.<ByteSource>of(
+          new ByteSource()
           {
             @Override
-            public InputStream getInput() throws IOException
+            public InputStream openStream() throws IOException
             {
-              final InputStream inputStream = new FileInputStream(file);
-              ByteStreams.skipFully(inputStream, offset);
-              return inputStream;
+              return LogUtils.streamFile(file, offset);
             }
           }
       );

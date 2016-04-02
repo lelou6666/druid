@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.realtime.plumber;
@@ -24,51 +24,62 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import com.metamx.common.IAE;
 import com.metamx.common.ISE;
-import com.metamx.common.logger.Logger;
 import io.druid.data.input.InputRow;
-import io.druid.data.input.impl.SpatialDimensionSchema;
 import io.druid.query.aggregation.AggregatorFactory;
+import io.druid.segment.QueryableIndex;
 import io.druid.segment.incremental.IncrementalIndex;
 import io.druid.segment.incremental.IncrementalIndexSchema;
+import io.druid.segment.incremental.IndexSizeExceededException;
+import io.druid.segment.incremental.OnheapIncrementalIndex;
 import io.druid.segment.indexing.DataSchema;
-import io.druid.segment.indexing.RealtimeTuningConfig;
 import io.druid.segment.realtime.FireHydrant;
 import io.druid.timeline.DataSegment;
+import io.druid.timeline.partition.ShardSpec;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- */
 public class Sink implements Iterable<FireHydrant>
 {
-  private static final Logger log = new Logger(Sink.class);
+  private static final int ADD_FAILED = -1;
 
-  private volatile FireHydrant currHydrant;
-
+  private final Object hydrantLock = new Object();
   private final Interval interval;
   private final DataSchema schema;
-  private final RealtimeTuningConfig config;
+  private final ShardSpec shardSpec;
   private final String version;
+  private final int maxRowsInMemory;
+  private final boolean reportParseExceptions;
   private final CopyOnWriteArrayList<FireHydrant> hydrants = new CopyOnWriteArrayList<FireHydrant>();
+  private final LinkedHashSet<String> dimOrder = Sets.newLinkedHashSet();
+  private final AtomicInteger numRowsExcludingCurrIndex = new AtomicInteger();
+  private volatile FireHydrant currHydrant;
+  private volatile boolean writable = true;
 
   public Sink(
       Interval interval,
       DataSchema schema,
-      RealtimeTuningConfig config,
-      String version
+      ShardSpec shardSpec,
+      String version,
+      int maxRowsInMemory,
+      boolean reportParseExceptions
   )
   {
     this.schema = schema;
-    this.config = config;
+    this.shardSpec = shardSpec;
     this.interval = interval;
     this.version = version;
+    this.maxRowsInMemory = maxRowsInMemory;
+    this.reportParseExceptions = reportParseExceptions;
 
     makeNewCurrIndex(interval.getStartMillis(), schema);
   }
@@ -76,21 +87,28 @@ public class Sink implements Iterable<FireHydrant>
   public Sink(
       Interval interval,
       DataSchema schema,
-      RealtimeTuningConfig config,
+      ShardSpec shardSpec,
       String version,
+      int maxRowsInMemory,
+      boolean reportParseExceptions,
       List<FireHydrant> hydrants
   )
   {
     this.schema = schema;
-    this.config = config;
+    this.shardSpec = shardSpec;
     this.interval = interval;
     this.version = version;
+    this.maxRowsInMemory = maxRowsInMemory;
+    this.reportParseExceptions = reportParseExceptions;
 
+    int maxCount = -1;
     for (int i = 0; i < hydrants.size(); ++i) {
       final FireHydrant hydrant = hydrants.get(i);
-      if (hydrant.getCount() != i) {
+      if (hydrant.getCount() <= maxCount) {
         throw new ISE("hydrant[%s] not the right count[%s]", hydrant, i);
       }
+      maxCount = hydrant.getCount();
+      numRowsExcludingCurrIndex.addAndGet(hydrant.getSegment().asQueryableIndex().getNumRows());
     }
     this.hydrants.addAll(hydrants);
 
@@ -112,26 +130,42 @@ public class Sink implements Iterable<FireHydrant>
     return currHydrant;
   }
 
-  public int add(InputRow row)
+  public int add(InputRow row) throws IndexSizeExceededException
   {
     if (currHydrant == null) {
       throw new IAE("No currHydrant but given row[%s]", row);
     }
 
-    synchronized (currHydrant) {
+    synchronized (hydrantLock) {
+      if (!writable) {
+        return ADD_FAILED;
+      }
+
       IncrementalIndex index = currHydrant.getIndex();
       if (index == null) {
-        return -1; // the hydrant was swapped without being replaced
+        return ADD_FAILED; // the hydrant was swapped without being replaced
       }
       return index.add(row);
     }
   }
 
+  public boolean canAppendRow()
+  {
+    synchronized (hydrantLock) {
+      return writable && currHydrant != null && currHydrant.getIndex().canAppendRow();
+    }
+  }
+
   public boolean isEmpty()
   {
-    synchronized (currHydrant) {
+    synchronized (hydrantLock) {
       return hydrants.size() == 1 && currHydrant.getIndex().isEmpty();
     }
+  }
+
+  public boolean isWritable()
+  {
+    return writable;
   }
 
   /**
@@ -146,8 +180,20 @@ public class Sink implements Iterable<FireHydrant>
 
   public boolean swappable()
   {
-    synchronized (currHydrant) {
-      return currHydrant.getIndex() != null && currHydrant.getIndex().size() != 0;
+    synchronized (hydrantLock) {
+      return writable && currHydrant.getIndex() != null && currHydrant.getIndex().size() != 0;
+    }
+  }
+
+  public boolean finished()
+  {
+    return !writable;
+  }
+
+  public void finishWriting()
+  {
+    synchronized (hydrantLock) {
+      writable = false;
     }
   }
 
@@ -161,41 +207,68 @@ public class Sink implements Iterable<FireHydrant>
         Lists.<String>newArrayList(),
         Lists.transform(
             Arrays.asList(schema.getAggregators()), new Function<AggregatorFactory, String>()
-        {
-          @Override
-          public String apply(@Nullable AggregatorFactory input)
-          {
-            return input.getName();
-          }
-        }
+            {
+              @Override
+              public String apply(@Nullable AggregatorFactory input)
+              {
+                return input.getName();
+              }
+            }
         ),
-        config.getShardSpec(),
+        shardSpec,
         null,
         0
     );
   }
 
+  public int getNumRows()
+  {
+    synchronized (hydrantLock) {
+      return numRowsExcludingCurrIndex.get() + currHydrant.getIndex().size();
+    }
+  }
+
   private FireHydrant makeNewCurrIndex(long minTimestamp, DataSchema schema)
   {
-    IncrementalIndex newIndex = new IncrementalIndex(
-        new IncrementalIndexSchema.Builder()
-            .withMinTimestamp(minTimestamp)
-            .withQueryGranularity(schema.getGranularitySpec().getQueryGranularity())
-            .withSpatialDimensions(schema.getParser())
-            .withMetrics(schema.getAggregators())
-            .build()
-    );
+    final IncrementalIndexSchema indexSchema = new IncrementalIndexSchema.Builder()
+        .withMinTimestamp(minTimestamp)
+        .withQueryGranularity(schema.getGranularitySpec().getQueryGranularity())
+        .withDimensionsSpec(schema.getParser())
+        .withMetrics(schema.getAggregators())
+        .build();
+    final IncrementalIndex newIndex = new OnheapIncrementalIndex(indexSchema, reportParseExceptions, maxRowsInMemory);
 
-    FireHydrant old;
-    if (currHydrant == null) {  // Only happens on initialization, cannot synchronize on null
-      old = currHydrant;
-      currHydrant = new FireHydrant(newIndex, hydrants.size(), getSegment().getIdentifier());
-      hydrants.add(currHydrant);
-    } else {
-      synchronized (currHydrant) {
+    final FireHydrant old;
+    synchronized (hydrantLock) {
+      if (writable) {
         old = currHydrant;
-        currHydrant = new FireHydrant(newIndex, hydrants.size(), getSegment().getIdentifier());
+        int newCount = 0;
+        int numHydrants = hydrants.size();
+        if (numHydrants > 0) {
+          FireHydrant lastHydrant = hydrants.get(numHydrants - 1);
+          newCount = lastHydrant.getCount() + 1;
+          if (!indexSchema.getDimensionsSpec().hasCustomDimensions()) {
+            if (lastHydrant.hasSwapped()) {
+              QueryableIndex oldIndex = lastHydrant.getSegment().asQueryableIndex();
+              for (String dim : oldIndex.getAvailableDimensions()) {
+                dimOrder.add(dim);
+              }
+            } else {
+              IncrementalIndex oldIndex = lastHydrant.getIndex();
+              dimOrder.addAll(oldIndex.getDimensionOrder());
+            }
+            newIndex.loadDimensionIterable(dimOrder);
+          }
+        }
+        currHydrant = new FireHydrant(newIndex, newCount, getSegment().getIdentifier());
+        if (old != null) {
+          numRowsExcludingCurrIndex.addAndGet(old.getIndex().size());
+        }
         hydrants.add(currHydrant);
+      } else {
+        // Oops, someone called finishWriting while we were making this new index.
+        newIndex.close();
+        throw new ISE("finishWriting() called during swap");
       }
     }
 
@@ -210,7 +283,7 @@ public class Sink implements Iterable<FireHydrant>
         new Predicate<FireHydrant>()
         {
           @Override
-          public boolean apply(@Nullable FireHydrant input)
+          public boolean apply(FireHydrant input)
           {
             final IncrementalIndex index = input.getIndex();
             return index == null || index.size() != 0;

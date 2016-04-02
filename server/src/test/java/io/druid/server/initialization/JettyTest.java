@@ -1,114 +1,137 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.initialization;
 
-import com.google.api.client.repackaged.com.google.common.base.Throwables;
-import com.google.common.collect.Lists;
+import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Binder;
-import com.google.inject.Inject;
 import com.google.inject.Injector;
+import com.google.inject.Key;
 import com.google.inject.Module;
-import com.google.inject.servlet.GuiceFilter;
-import com.metamx.common.lifecycle.Lifecycle;
-import com.metamx.http.client.HttpClient;
+import com.google.inject.multibindings.Multibinder;
+import com.metamx.http.client.Request;
 import com.metamx.http.client.response.InputStreamResponseHandler;
 import com.metamx.http.client.response.StatusResponseHandler;
 import com.metamx.http.client.response.StatusResponseHolder;
+import io.druid.guice.GuiceInjectors;
 import io.druid.guice.Jerseys;
+import io.druid.guice.JsonConfigProvider;
 import io.druid.guice.LazySingleton;
-import io.druid.guice.annotations.Global;
+import io.druid.guice.LifecycleModule;
+import io.druid.guice.annotations.Self;
 import io.druid.initialization.Initialization;
+import io.druid.server.DruidNode;
+import io.druid.server.initialization.jetty.JettyServerInitializer;
+import io.druid.server.initialization.jetty.ServletFilterHolder;
 import org.apache.commons.io.IOUtils;
-import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.handler.DefaultHandler;
-import org.eclipse.jetty.server.handler.HandlerList;
-import org.eclipse.jetty.servlet.DefaultServlet;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.eclipse.jetty.servlets.GzipFilter;
-import org.junit.After;
+import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
-import javax.servlet.ServletOutputStream;
+import javax.servlet.DispatcherType;
+import javax.servlet.Filter;
 import javax.servlet.http.HttpServletResponse;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringWriter;
+import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.Charset;
-import java.util.Random;
+import java.util.EnumSet;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class JettyTest
+public class JettyTest extends BaseJettyTest
 {
-  private Lifecycle lifecycle;
-  private HttpClient client;
-
-  public static void setProperties()
+  @Override
+  protected Injector setupInjector()
   {
-    System.setProperty("druid.host", "localhost:9999");
-    System.setProperty("druid.port", "9999");
-    System.setProperty("druid.server.http.numThreads", "20");
-    System.setProperty("druid.service", "test");
-    System.setProperty("druid.server.http.maxIdleTime", "PT1S");
-    System.setProperty("druid.global.http.readTimeout", "PT1S");
-  }
+    return Initialization.makeInjectorWithModules(
+        GuiceInjectors.makeStartupInjector(),
+        ImmutableList.<Module>of(
+            new Module()
+            {
+              @Override
+              public void configure(Binder binder)
+              {
+                JsonConfigProvider.bindInstance(
+                    binder, Key.get(DruidNode.class, Self.class), new DruidNode("test", "localhost", null)
+                );
+                binder.bind(JettyServerInitializer.class).to(JettyServerInit.class).in(LazySingleton.class);
 
-  @Before
-  public void setup() throws Exception
-  {
-    setProperties();
-    Injector injector = Initialization.makeInjectorWithModules(
-        Initialization.makeStartupInjector(), Lists.<Object>newArrayList(
-        new Module()
-        {
-          @Override
-          public void configure(Binder binder)
-          {
-            binder.bind(JettyServerInitializer.class).to(JettyServerInit.class).in(LazySingleton.class);
-            Jerseys.addResource(binder, SlowResource.class);
-            Jerseys.addResource(binder, ExceptionResource.class);
-          }
-        }
-    )
+                Multibinder<ServletFilterHolder> multibinder = Multibinder.newSetBinder(
+                    binder,
+                    ServletFilterHolder.class
+                );
+
+                multibinder.addBinding().toInstance(
+                    new ServletFilterHolder()
+                    {
+
+                      @Override
+                      public String getPath()
+                      {
+                        return "/*";
+                      }
+
+                      @Override
+                      public Map<String, String> getInitParameters()
+                      {
+                        return null;
+                      }
+
+                      @Override
+                      public Class<? extends Filter> getFilterClass()
+                      {
+                        return DummyAuthFilter.class;
+                      }
+
+                      @Override
+                      public Filter getFilter()
+                      {
+                        return null;
+                      }
+
+                      @Override
+                      public EnumSet<DispatcherType> getDispatcherType()
+                      {
+                        return null;
+                      }
+                    });
+
+                Jerseys.addResource(binder, SlowResource.class);
+                Jerseys.addResource(binder, ExceptionResource.class);
+                Jerseys.addResource(binder, DefaultResource.class);
+                LifecycleModule.register(binder, Server.class);
+              }
+            }
+        )
     );
-    lifecycle = injector.getInstance(Lifecycle.class);
-    // Jetty is Lazy Initialized do a getInstance
-    injector.getInstance(Server.class);
-    lifecycle.start();
-    ClientHolder holder = injector.getInstance(ClientHolder.class);
-    client = holder.getClient();
+
   }
 
   @Test
@@ -135,12 +158,11 @@ public class JettyTest
                       long startTime = System.currentTimeMillis();
                       long startTime2 = 0;
                       try {
-                        ListenableFuture<StatusResponseHolder> go = client.get(
-                            new URL(
-                                "http://localhost:9999/slow/hello"
-                            )
-                        )
-                                                                          .go(new StatusResponseHandler(Charset.defaultCharset()));
+                        ListenableFuture<StatusResponseHolder> go =
+                            client.go(
+                                new Request(HttpMethod.GET, new URL("http://localhost:" + port + "/slow/hello")),
+                                new StatusResponseHandler(Charset.defaultCharset())
+                            );
                         startTime2 = System.currentTimeMillis();
                         go.get();
                       }
@@ -149,13 +171,13 @@ public class JettyTest
                       }
                       finally {
                         System.out
-                              .println(
-                                  "Response time client"
-                                  + (System.currentTimeMillis() - startTime)
-                                  + "time taken for getting future"
-                                  + (System.currentTimeMillis() - startTime2)
-                                  + "Counter " + count.incrementAndGet()
-                              );
+                            .println(
+                                "Response time client"
+                                + (System.currentTimeMillis() - startTime)
+                                + "time taken for getting future"
+                                + (System.currentTimeMillis() - startTime2)
+                                + "Counter " + count.incrementAndGet()
+                            );
                         latch.countDown();
 
                       }
@@ -170,6 +192,27 @@ public class JettyTest
     latch.await();
   }
 
+  @Test
+  public void testGzipCompression() throws Exception
+  {
+    final URL url = new URL("http://localhost:" + port + "/default");
+    final HttpURLConnection get = (HttpURLConnection) url.openConnection();
+    get.setRequestProperty("Accept-Encoding", "gzip");
+    Assert.assertEquals("gzip", get.getContentEncoding());
+
+    final HttpURLConnection post = (HttpURLConnection) url.openConnection();
+    post.setRequestProperty("Accept-Encoding", "gzip");
+    post.setRequestMethod("POST");
+    Assert.assertEquals("gzip", post.getContentEncoding());
+
+    final HttpURLConnection getNoGzip = (HttpURLConnection) url.openConnection();
+    Assert.assertNotEquals("gzip", getNoGzip.getContentEncoding());
+
+    final HttpURLConnection postNoGzip = (HttpURLConnection) url.openConnection();
+    postNoGzip.setRequestMethod("POST");
+    Assert.assertNotEquals("gzip", postNoGzip.getContentEncoding());
+  }
+
   // Tests that threads are not stuck when partial chunk is not finalized
   // https://bugs.eclipse.org/bugs/show_bug.cgi?id=424107
   @Test
@@ -177,13 +220,11 @@ public class JettyTest
   // above bug is not fixed in jetty for gzip encoding, and the chunk is still finalized instead of throwing exception.
   public void testChunkNotFinalized() throws Exception
   {
-    ListenableFuture<InputStream> go = client.get(
-        new URL(
-            "http://localhost:9999/exception/exception"
-        )
-
-    )
-                                             .go(new InputStreamResponseHandler());
+    ListenableFuture<InputStream> go =
+        client.go(
+            new Request(HttpMethod.GET, new URL("http://localhost:" + port + "/exception/exception")),
+            new InputStreamResponseHandler()
+        );
     try {
       StringWriter writer = new StringWriter();
       IOUtils.copy(go.get(), writer, "utf-8");
@@ -206,13 +247,10 @@ public class JettyTest
           public void run()
           {
             try {
-              ListenableFuture<InputStream> go = client.get(
-                  new URL(
-                      "http://localhost:9999/exception/exception"
-                  )
-
-              )
-                                                       .go(new InputStreamResponseHandler());
+              ListenableFuture<InputStream> go = client.go(
+                  new Request(HttpMethod.GET, new URL("http://localhost:" + port + "/exception/exception")),
+                  new InputStreamResponseHandler()
+              );
               StringWriter writer = new StringWriter();
               IOUtils.copy(go.get(), writer, "utf-8");
             }
@@ -230,86 +268,16 @@ public class JettyTest
     latch.await(5, TimeUnit.SECONDS);
   }
 
-  @After
-  public void teardown()
+  @Test
+  public void testExtensionAuthFilter() throws Exception
   {
-    lifecycle.stop();
-  }
+    URL url = new URL("http://localhost:" + port + "/default");
+    HttpURLConnection get = (HttpURLConnection) url.openConnection();
+    get.setRequestProperty(DummyAuthFilter.AUTH_HDR, DummyAuthFilter.SECRET_USER);
+    Assert.assertEquals(HttpServletResponse.SC_OK, get.getResponseCode());
 
-  public static class ClientHolder
-  {
-    HttpClient client;
-
-    @Inject
-    ClientHolder(@Global HttpClient client)
-    {
-      this.client = client;
-    }
-
-    public HttpClient getClient()
-    {
-      return client;
-    }
-  }
-
-  public static class JettyServerInit implements JettyServerInitializer
-  {
-
-    @Override
-    public void initialize(Server server, Injector injector)
-    {
-      final ServletContextHandler root = new ServletContextHandler(ServletContextHandler.SESSIONS);
-      root.addServlet(new ServletHolder(new DefaultServlet()), "/*");
-      root.addFilter(GzipFilter.class, "/*", null);
-      root.addFilter(GuiceFilter.class, "/*", null);
-
-      final HandlerList handlerList = new HandlerList();
-      handlerList.setHandlers(new Handler[]{root, new DefaultHandler()});
-      server.setHandler(handlerList);
-    }
-  }
-
-  @Path("/slow")
-  public static class SlowResource
-  {
-
-    public static Random random = new Random();
-
-    @GET
-    @Path("/hello")
-    @Produces("application/json")
-    public Response hello()
-    {
-      try {
-        TimeUnit.MILLISECONDS.sleep(100 + random.nextInt(2000));
-      }
-      catch (InterruptedException e) {
-        //
-      }
-      return Response.ok("hello").build();
-    }
-  }
-
-  @Path("/exception")
-  public static class ExceptionResource
-  {
-    @GET
-    @Path("/exception")
-    @Produces("application/json")
-    public Response exception(
-        @Context HttpServletResponse resp
-    ) throws IOException
-    {
-      final ServletOutputStream outputStream = resp.getOutputStream();
-      outputStream.println("hello");
-      outputStream.flush();
-      try {
-        TimeUnit.MILLISECONDS.sleep(200);
-      }
-      catch (InterruptedException e) {
-        //
-      }
-      throw new IOException();
-    }
+    get = (HttpURLConnection) url.openConnection();
+    get.setRequestProperty(DummyAuthFilter.AUTH_HDR, "hacker");
+    Assert.assertEquals(HttpServletResponse.SC_UNAUTHORIZED, get.getResponseCode());
   }
 }

@@ -1,27 +1,36 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.timeboundary;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.druid.jackson.DefaultObjectMapper;
+import io.druid.query.CacheStrategy;
+import io.druid.query.Result;
+import io.druid.query.TableDataSource;
+import io.druid.query.spec.MultipleIntervalSegmentSpec;
 import io.druid.timeline.LogicalSegment;
-import junit.framework.Assert;
+import org.joda.time.DateTime;
 import org.joda.time.Interval;
+import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -31,70 +40,171 @@ import java.util.List;
  */
 public class TimeBoundaryQueryQueryToolChestTest
 {
+
+  private static final TimeBoundaryQuery TIME_BOUNDARY_QUERY = new TimeBoundaryQuery(
+      new TableDataSource("test"),
+      null,
+      null,
+      null
+  );
+
+  private static final TimeBoundaryQuery MAXTIME_BOUNDARY_QUERY = new TimeBoundaryQuery(
+      new TableDataSource("test"),
+      null,
+      TimeBoundaryQuery.MAX_TIME,
+      null
+  );
+
+  private static final TimeBoundaryQuery MINTIME_BOUNDARY_QUERY = new TimeBoundaryQuery(
+      new TableDataSource("test"),
+      null,
+      TimeBoundaryQuery.MIN_TIME,
+      null
+  );
+
+
+  private static LogicalSegment createLogicalSegment(final Interval interval)
+  {
+    return new LogicalSegment()
+    {
+      @Override
+      public Interval getInterval()
+      {
+        return interval;
+      }
+    };
+  }
+
   @Test
   public void testFilterSegments() throws Exception
   {
     List<LogicalSegment> segments = new TimeBoundaryQueryQueryToolChest().filterSegments(
-        null,
+        TIME_BOUNDARY_QUERY,
         Arrays.asList(
-            new LogicalSegment()
-            {
-              @Override
-              public Interval getInterval()
-              {
-                return new Interval("2013-01-01/P1D");
-              }
-            },
-            new LogicalSegment()
-            {
-              @Override
-              public Interval getInterval()
-              {
-                return new Interval("2013-01-01T01/PT1H");
-              }
-            },
-            new LogicalSegment()
-            {
-              @Override
-              public Interval getInterval()
-              {
-                return new Interval("2013-01-01T02/PT1H");
-              }
-            }
+            createLogicalSegment(new Interval("2013-01-01/P1D")),
+            createLogicalSegment(new Interval("2013-01-01T01/PT1H")),
+            createLogicalSegment(new Interval("2013-01-01T02/PT1H")),
+            createLogicalSegment(new Interval("2013-01-02/P1D")),
+            createLogicalSegment(new Interval("2013-01-03T01/PT1H")),
+            createLogicalSegment(new Interval("2013-01-03T02/PT1H")),
+            createLogicalSegment(new Interval("2013-01-03/P1D"))
         )
     );
 
-    Assert.assertEquals(segments.size(), 3);
+    Assert.assertEquals(6, segments.size());
 
     List<LogicalSegment> expected = Arrays.asList(
-        new LogicalSegment()
-        {
-          @Override
-          public Interval getInterval()
-          {
-            return new Interval("2013-01-01/P1D");
-          }
-        },
-        new LogicalSegment()
-        {
-          @Override
-          public Interval getInterval()
-          {
-            return new Interval("2013-01-01T01/PT1H");
-          }
-        },
-        new LogicalSegment()
-        {
-          @Override
-          public Interval getInterval()
-          {
-            return new Interval("2013-01-01T02/PT1H");
-          }
-        }
+        createLogicalSegment(new Interval("2013-01-01/P1D")),
+        createLogicalSegment(new Interval("2013-01-01T01/PT1H")),
+        createLogicalSegment(new Interval("2013-01-01T02/PT1H")),
+        createLogicalSegment(new Interval("2013-01-03T01/PT1H")),
+        createLogicalSegment(new Interval("2013-01-03T02/PT1H")),
+        createLogicalSegment(new Interval("2013-01-03/P1D"))
     );
 
     for (int i = 0; i < segments.size(); i++) {
        Assert.assertEquals(segments.get(i).getInterval(), expected.get(i).getInterval());
     }
+  }
+
+  @Test
+  public void testMaxTimeFilterSegments() throws Exception
+  {
+    List<LogicalSegment> segments = new TimeBoundaryQueryQueryToolChest().filterSegments(
+        MAXTIME_BOUNDARY_QUERY,
+        Arrays.asList(
+            createLogicalSegment(new Interval("2013-01-01/P1D")),
+            createLogicalSegment(new Interval("2013-01-01T01/PT1H")),
+            createLogicalSegment(new Interval("2013-01-01T02/PT1H")),
+            createLogicalSegment(new Interval("2013-01-02/P1D")),
+            createLogicalSegment(new Interval("2013-01-03T01/PT1H")),
+            createLogicalSegment(new Interval("2013-01-03T02/PT1H")),
+            createLogicalSegment(new Interval("2013-01-03/P1D"))
+        )
+    );
+
+    Assert.assertEquals(3, segments.size());
+
+    List<LogicalSegment> expected = Arrays.asList(
+        createLogicalSegment(new Interval("2013-01-03T01/PT1H")),
+        createLogicalSegment(new Interval("2013-01-03T02/PT1H")),
+        createLogicalSegment(new Interval("2013-01-03/P1D"))
+    );
+
+    for (int i = 0; i < segments.size(); i++) {
+      Assert.assertEquals(segments.get(i).getInterval(), expected.get(i).getInterval());
+    }
+  }
+
+  @Test
+  public void testMinTimeFilterSegments() throws Exception
+  {
+    List<LogicalSegment> segments = new TimeBoundaryQueryQueryToolChest().filterSegments(
+        MINTIME_BOUNDARY_QUERY,
+        Arrays.asList(
+            createLogicalSegment(new Interval("2013-01-01/P1D")),
+            createLogicalSegment(new Interval("2013-01-01T01/PT1H")),
+            createLogicalSegment(new Interval("2013-01-01T02/PT1H")),
+            createLogicalSegment(new Interval("2013-01-02/P1D")),
+            createLogicalSegment(new Interval("2013-01-03T01/PT1H")),
+            createLogicalSegment(new Interval("2013-01-03T02/PT1H")),
+            createLogicalSegment(new Interval("2013-01-03/P1D"))
+        )
+    );
+
+    Assert.assertEquals(3, segments.size());
+
+    List<LogicalSegment> expected = Arrays.asList(
+        createLogicalSegment(new Interval("2013-01-01/P1D")),
+        createLogicalSegment(new Interval("2013-01-01T01/PT1H")),
+        createLogicalSegment(new Interval("2013-01-01T02/PT1H"))
+    );
+
+    for (int i = 0; i < segments.size(); i++) {
+      Assert.assertEquals(segments.get(i).getInterval(), expected.get(i).getInterval());
+    }
+  }
+
+  @Test
+  public void testCacheStrategy() throws Exception
+  {
+    CacheStrategy<Result<TimeBoundaryResultValue>, Object, TimeBoundaryQuery> strategy =
+        new TimeBoundaryQueryQueryToolChest().getCacheStrategy(
+            new TimeBoundaryQuery(
+                new TableDataSource("dummy"),
+                new MultipleIntervalSegmentSpec(
+                    ImmutableList.of(
+                        new Interval(
+                            "2015-01-01/2015-01-02"
+                        )
+                    )
+                ),
+                null,
+                null
+            )
+        );
+
+    final Result<TimeBoundaryResultValue> result = new Result<>(
+        new DateTime(123L), new TimeBoundaryResultValue(
+        ImmutableMap.of(
+            TimeBoundaryQuery.MIN_TIME, new DateTime(0L).toString(),
+            TimeBoundaryQuery.MAX_TIME, new DateTime("2015-01-01").toString()
+        )
+    )
+    );
+
+    Object preparedValue = strategy.prepareForCache().apply(
+        result
+    );
+
+    ObjectMapper objectMapper = new DefaultObjectMapper();
+    Object fromCacheValue = objectMapper.readValue(
+        objectMapper.writeValueAsBytes(preparedValue),
+        strategy.getCacheObjectClazz()
+    );
+
+    Result<TimeBoundaryResultValue> fromCacheResult = strategy.pullFromCache().apply(fromCacheValue);
+
+    Assert.assertEquals(result, fromCacheResult);
   }
 }

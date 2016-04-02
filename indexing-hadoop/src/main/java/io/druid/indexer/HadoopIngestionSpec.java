@@ -1,46 +1,46 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexer;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Preconditions;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Lists;
-import com.metamx.common.Granularity;
-import io.druid.data.input.impl.DataSpec;
-import io.druid.data.input.impl.StringInputRowParser;
-import io.druid.data.input.impl.TimestampSpec;
-import io.druid.indexer.partitions.PartitionsSpec;
-import io.druid.indexer.partitions.SingleDimensionPartitionsSpec;
-import io.druid.indexer.rollup.DataRollupSpec;
-import io.druid.indexer.updater.DbUpdaterJobSpec;
-import io.druid.query.aggregation.AggregatorFactory;
+import com.google.common.collect.Ordering;
+import io.druid.common.utils.UUIDUtils;
+import io.druid.indexer.hadoop.DatasourceIngestionSpec;
+import io.druid.indexer.hadoop.WindowedDataSegment;
+import io.druid.indexer.path.UsedSegmentLister;
 import io.druid.segment.indexing.DataSchema;
 import io.druid.segment.indexing.IngestionSpec;
-import io.druid.segment.indexing.granularity.GranularitySpec;
-import io.druid.segment.indexing.granularity.UniformGranularitySpec;
-import org.joda.time.DateTime;
+import io.druid.timeline.DataSegment;
+import io.druid.timeline.TimelineObjectHolder;
+import io.druid.timeline.VersionedIntervalTimeline;
+import io.druid.timeline.partition.PartitionChunk;
 import org.joda.time.Interval;
 
+import java.io.IOException;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  */
@@ -50,124 +50,33 @@ public class HadoopIngestionSpec extends IngestionSpec<HadoopIOConfig, HadoopTun
   private final HadoopIOConfig ioConfig;
   private final HadoopTuningConfig tuningConfig;
 
+  //this is used in the temporary paths on the hdfs unique to an hadoop indexing task
+  private final String uniqueId;
+
   @JsonCreator
   public HadoopIngestionSpec(
       @JsonProperty("dataSchema") DataSchema dataSchema,
       @JsonProperty("ioConfig") HadoopIOConfig ioConfig,
       @JsonProperty("tuningConfig") HadoopTuningConfig tuningConfig,
-      // All deprecated
-      final @JsonProperty("dataSource") String dataSource,
-      final @JsonProperty("timestampSpec") TimestampSpec timestampSpec,
-      final @JsonProperty("dataSpec") DataSpec dataSpec,
-      final @JsonProperty("granularitySpec") GranularitySpec granularitySpec,
-      final @JsonProperty("pathSpec") Map<String, Object> pathSpec,
-      final @JsonProperty("workingPath") String workingPath,
-      final @JsonProperty("segmentOutputPath") String segmentOutputPath,
-      final @JsonProperty("version") String version,
-      final @JsonProperty("partitionsSpec") PartitionsSpec partitionsSpec,
-      final @JsonProperty("leaveIntermediate") boolean leaveIntermediate,
-      final @JsonProperty("cleanupOnFailure") Boolean cleanupOnFailure,
-      final @JsonProperty("shardSpecs") Map<DateTime, List<HadoopyShardSpec>> shardSpecs,
-      final @JsonProperty("overwriteFiles") boolean overwriteFiles,
-      final @JsonProperty("rollupSpec") DataRollupSpec rollupSpec,
-      final @JsonProperty("updaterJobSpec") DbUpdaterJobSpec updaterJobSpec,
-      final @JsonProperty("ignoreInvalidRows") boolean ignoreInvalidRows,
-      final @JsonProperty("jobProperties") Map<String, String> jobProperties,
-      final @JsonProperty("combineText") boolean combineText,
-      // These fields are deprecated and will be removed in the future
-      final @JsonProperty("timestampColumn") String timestampColumn,
-      final @JsonProperty("timestampFormat") String timestampFormat,
-      final @JsonProperty("intervals") List<Interval> intervals,
-      final @JsonProperty("segmentGranularity") Granularity segmentGranularity,
-      final @JsonProperty("partitionDimension") String partitionDimension,
-      final @JsonProperty("targetPartitionSize") Long targetPartitionSize
+      @JsonProperty("uniqueId") String uniqueId
   )
   {
     super(dataSchema, ioConfig, tuningConfig);
 
-    if (dataSchema != null) {
-      this.dataSchema = dataSchema;
-      this.ioConfig = ioConfig;
-      this.tuningConfig = tuningConfig == null ? HadoopTuningConfig.makeDefaultTuningConfig() : tuningConfig;
-    } else { // Backwards compatibility
-      TimestampSpec theTimestampSpec = (timestampSpec == null)
-                                       ? new TimestampSpec(timestampColumn, timestampFormat)
-                                       : timestampSpec;
-      List<String> dimensionExclusions = Lists.newArrayList();
+    this.dataSchema = dataSchema;
+    this.ioConfig = ioConfig;
+    this.tuningConfig = tuningConfig == null ? HadoopTuningConfig.makeDefaultTuningConfig() : tuningConfig;
+    this.uniqueId = uniqueId == null ? UUIDUtils.generateUuid() : uniqueId;
+  }
 
-      dimensionExclusions.add(theTimestampSpec.getTimestampColumn());
-      if (rollupSpec != null) {
-        for (AggregatorFactory aggregatorFactory : rollupSpec.getAggs()) {
-          dimensionExclusions.add(aggregatorFactory.getName());
-        }
-      }
-
-      PartitionsSpec thePartitionSpec;
-      if (partitionsSpec != null) {
-        Preconditions.checkArgument(
-            partitionDimension == null && targetPartitionSize == null,
-            "Cannot mix partitionsSpec with partitionDimension/targetPartitionSize"
-        );
-        thePartitionSpec = partitionsSpec;
-      } else {
-        // Backwards compatibility
-        thePartitionSpec = new SingleDimensionPartitionsSpec(partitionDimension, targetPartitionSize, null, false);
-      }
-
-      GranularitySpec theGranularitySpec = null;
-      if (granularitySpec != null) {
-        Preconditions.checkArgument(
-            segmentGranularity == null && intervals == null,
-            "Cannot mix granularitySpec with segmentGranularity/intervals"
-        );
-        theGranularitySpec = granularitySpec;
-        if (rollupSpec != null) {
-          theGranularitySpec = theGranularitySpec.withQueryGranularity(rollupSpec.rollupGranularity);
-        }
-      } else {
-        // Backwards compatibility
-        if (segmentGranularity != null && intervals != null) {
-          theGranularitySpec = new UniformGranularitySpec(
-              segmentGranularity,
-              rollupSpec == null ? null : rollupSpec.rollupGranularity,
-              intervals,
-              segmentGranularity
-          );
-        }
-      }
-
-      this.dataSchema = new DataSchema(
-          dataSource,
-          new StringInputRowParser(
-              dataSpec == null ? null : dataSpec.toParseSpec(theTimestampSpec, dimensionExclusions),
-              null, null, null, null
-          ),
-          rollupSpec == null
-          ? new AggregatorFactory[]{}
-          : rollupSpec.getAggs().toArray(new AggregatorFactory[rollupSpec.getAggs().size()]),
-          theGranularitySpec
-      );
-
-      this.ioConfig = new HadoopIOConfig(
-          pathSpec,
-          updaterJobSpec,
-          segmentOutputPath
-      );
-
-      this.tuningConfig = new HadoopTuningConfig(
-          workingPath,
-          version,
-          thePartitionSpec,
-          shardSpecs,
-          rollupSpec == null ? 50000 : rollupSpec.rowFlushBoundary,
-          leaveIntermediate,
-          cleanupOnFailure,
-          overwriteFiles,
-          ignoreInvalidRows,
-          jobProperties,
-          combineText
-      );
-    }
+  //for unit tests
+  public HadoopIngestionSpec(
+      DataSchema dataSchema,
+      HadoopIOConfig ioConfig,
+      HadoopTuningConfig tuningConfig
+  )
+  {
+    this(dataSchema, ioConfig, tuningConfig, null);
   }
 
   @JsonProperty("dataSchema")
@@ -191,36 +100,19 @@ public class HadoopIngestionSpec extends IngestionSpec<HadoopIOConfig, HadoopTun
     return tuningConfig;
   }
 
+  @JsonProperty("uniqueId")
+  public String getUniqueId()
+  {
+    return uniqueId;
+  }
+
   public HadoopIngestionSpec withDataSchema(DataSchema schema)
   {
     return new HadoopIngestionSpec(
         schema,
         ioConfig,
         tuningConfig,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        false,
-        null,
-        null,
-        false,
-        null,
-        null,
-        false,
-        null,
-        false,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
+        uniqueId
     );
   }
 
@@ -230,30 +122,7 @@ public class HadoopIngestionSpec extends IngestionSpec<HadoopIOConfig, HadoopTun
         dataSchema,
         config,
         tuningConfig,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        false,
-        null,
-        null,
-        false,
-        null,
-        null,
-        false,
-        null,
-        false,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
+        uniqueId
     );
   }
 
@@ -263,30 +132,89 @@ public class HadoopIngestionSpec extends IngestionSpec<HadoopIOConfig, HadoopTun
         dataSchema,
         ioConfig,
         config,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        false,
-        null,
-        null,
-        false,
-        null,
-        null,
-        false,
-        null,
-        false,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
+        uniqueId
     );
   }
+
+  public static HadoopIngestionSpec updateSegmentListIfDatasourcePathSpecIsUsed(
+      HadoopIngestionSpec spec,
+      ObjectMapper jsonMapper,
+      UsedSegmentLister segmentLister
+  )
+      throws IOException
+  {
+    String dataSource = "dataSource";
+    String type = "type";
+    String multi = "multi";
+    String children = "children";
+    String segments = "segments";
+    String ingestionSpec = "ingestionSpec";
+
+    Map<String, Object> pathSpec = spec.getIOConfig().getPathSpec();
+    Map<String, Object> datasourcePathSpec = null;
+    if (pathSpec.get(type).equals(dataSource)) {
+      datasourcePathSpec = pathSpec;
+    } else if (pathSpec.get(type).equals(multi)) {
+      List<Map<String, Object>> childPathSpecs = (List<Map<String, Object>>) pathSpec.get(children);
+      for (Map<String, Object> childPathSpec : childPathSpecs) {
+        if (childPathSpec.get(type).equals(dataSource)) {
+          datasourcePathSpec = childPathSpec;
+          break;
+        }
+      }
+    }
+
+    if (datasourcePathSpec != null) {
+      Map<String, Object> ingestionSpecMap = (Map<String, Object>) datasourcePathSpec.get(ingestionSpec);
+      DatasourceIngestionSpec ingestionSpecObj = jsonMapper.convertValue(
+          ingestionSpecMap,
+          DatasourceIngestionSpec.class
+      );
+
+      List<DataSegment> segmentsList = segmentLister.getUsedSegmentsForIntervals(
+          ingestionSpecObj.getDataSource(),
+          ingestionSpecObj.getIntervals()
+      );
+
+      if (ingestionSpecObj.getSegments() != null) {
+        //ensure that user supplied segment list matches with the segmentsList obtained from db
+        //this safety check lets users do test-n-set kind of batch delta ingestion where the delta
+        //ingestion task would only run if current state of the system is same as when they submitted
+        //the task.
+        List<DataSegment> userSuppliedSegmentsList = ingestionSpecObj.getSegments();
+
+        if (segmentsList.size() == userSuppliedSegmentsList.size()) {
+          Set<DataSegment> segmentsSet = new HashSet<>(segmentsList);
+
+          for (DataSegment userSegment : userSuppliedSegmentsList) {
+            if (!segmentsSet.contains(userSegment)) {
+              throw new IOException("user supplied segments list did not match with segments list obtained from db");
+            }
+          }
+        } else {
+          throw new IOException("user supplied segments list did not match with segments list obtained from db");
+        }
+      }
+
+      VersionedIntervalTimeline<String, DataSegment> timeline = new VersionedIntervalTimeline<>(Ordering.natural());
+      for (DataSegment segment : segmentsList) {
+        timeline.add(segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(segment));
+      }
+
+      final List<WindowedDataSegment> windowedSegments = Lists.newArrayList();
+      for (Interval interval : ingestionSpecObj.getIntervals()) {
+        final List<TimelineObjectHolder<String, DataSegment>> timeLineSegments = timeline.lookup(interval);
+
+        for (TimelineObjectHolder<String, DataSegment> holder : timeLineSegments) {
+          for (PartitionChunk<DataSegment> chunk : holder.getObject()) {
+            windowedSegments.add(new WindowedDataSegment(chunk.getObject(), holder.getInterval()));
+          }
+        }
+        datasourcePathSpec.put(segments, windowedSegments);
+      }
+    }
+
+    return spec;
+  }
+
 }

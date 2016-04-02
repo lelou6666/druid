@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.granularity;
@@ -23,14 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import io.druid.jackson.DefaultObjectMapper;
-import org.joda.time.DateTime;
-import org.joda.time.DateTimeZone;
-import org.joda.time.Days;
-import org.joda.time.Hours;
-import org.joda.time.Minutes;
-import org.joda.time.Months;
-import org.joda.time.Period;
-import org.joda.time.Weeks;
+import org.joda.time.*;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -177,6 +170,130 @@ public class QueryGranularityTest
             new DateTime("2011-01-04T00:00:00.000Z")
         ),
         QueryGranularity.DAY.iterable(baseTime.getMillis(), baseTime.plus(Days.days(3)).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableWeekSimple()
+  {
+    final DateTime baseTime = new DateTime("2011-01-03T00:00:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-03T00:00:00.000Z"),
+            new DateTime("2011-01-10T00:00:00.000Z"),
+            new DateTime("2011-01-17T00:00:00.000Z")
+        ),
+        QueryGranularity.WEEK.iterable(baseTime.getMillis(), baseTime.plus(Weeks.THREE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableWeekComplex()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T09:38:02.992Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2010-12-27T00:00:00.000Z"),
+            new DateTime("2011-01-03T00:00:00.000Z"),
+            new DateTime("2011-01-10T00:00:00.000Z"),
+            new DateTime("2011-01-17T00:00:00.000Z")
+        ),
+        QueryGranularity.WEEK.iterable(baseTime.getMillis(), baseTime.plus(Weeks.THREE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableMonthSimple()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T00:00:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-01T00:00:00.000Z"),
+            new DateTime("2011-02-01T00:00:00.000Z"),
+            new DateTime("2011-03-01T00:00:00.000Z")
+        ),
+        QueryGranularity.MONTH.iterable(baseTime.getMillis(), baseTime.plus(Months.THREE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableMonthComplex()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T09:38:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-01T00:00:00.000Z"),
+            new DateTime("2011-02-01T00:00:00.000Z"),
+            new DateTime("2011-03-01T00:00:00.000Z"),
+            new DateTime("2011-04-01T00:00:00.000Z")
+        ),
+        QueryGranularity.MONTH.iterable(baseTime.getMillis(), baseTime.plus(Months.THREE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableQuarterSimple()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T00:00:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-01T00:00:00.000Z"),
+            new DateTime("2011-04-01T00:00:00.000Z"),
+            new DateTime("2011-07-01T00:00:00.000Z")
+        ),
+        QueryGranularity.QUARTER.iterable(baseTime.getMillis(), baseTime.plus(Months.NINE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableQuarterComplex()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T09:38:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-01T00:00:00.000Z"),
+            new DateTime("2011-04-01T00:00:00.000Z"),
+            new DateTime("2011-07-01T00:00:00.000Z"),
+            new DateTime("2011-10-01T00:00:00.000Z")
+        ),
+        QueryGranularity.QUARTER.iterable(baseTime.getMillis(), baseTime.plus(Months.NINE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableYearSimple()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T00:00:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-01T00:00:00.000Z"),
+            new DateTime("2012-01-01T00:00:00.000Z"),
+            new DateTime("2013-01-01T00:00:00.000Z")
+        ),
+        QueryGranularity.YEAR.iterable(baseTime.getMillis(), baseTime.plus(Years.THREE).getMillis())
+    );
+  }
+
+  @Test
+  public void testIterableYearComplex()
+  {
+    final DateTime baseTime = new DateTime("2011-01-01T09:38:00.000Z");
+
+    assertSame(
+        Lists.newArrayList(
+            new DateTime("2011-01-01T00:00:00.000Z"),
+            new DateTime("2012-01-01T00:00:00.000Z"),
+            new DateTime("2013-01-01T00:00:00.000Z"),
+            new DateTime("2014-01-01T00:00:00.000Z")
+        ),
+        QueryGranularity.YEAR.iterable(baseTime.getMillis(), baseTime.plus(Years.THREE).getMillis())
     );
   }
 
@@ -347,67 +464,127 @@ public class QueryGranularityTest
   @Test
   public void testCompoundPeriodTruncate() throws Exception
   {
-    final DateTime origin = new DateTime("2012-01-02T05:00:00.000-08:00");
-    QueryGranularity periodOrigin = new PeriodGranularity(new Period("P1M2D"),
-                                                          origin,
-                                                          DateTimeZone.forID("America/Los_Angeles"));
-    assertSame(
-        Lists.newArrayList(
-            new DateTime("2011-11-30T05:00:00.000-08:00"),
-            new DateTime("2012-01-02T05:00:00.000-08:00"),
-            new DateTime("2012-02-04T05:00:00.000-08:00"),
-            new DateTime("2012-02-04T05:00:00.000-08:00")
-        ),
-        Lists.newArrayList(
-            periodOrigin.truncate(new DateTime("2012-01-01T05:00:04.123-08:00").getMillis()),
-            periodOrigin.truncate(new DateTime("2012-01-02T07:00:04.123-08:00").getMillis()),
-            periodOrigin.truncate(new DateTime("2012-03-01T07:20:04.123-08:00").getMillis()),
-            periodOrigin.truncate(new DateTime("2012-02-04T05:00:00.000-08:00").getMillis())
-        )
-    );
+    {
+      final DateTime origin = new DateTime("2012-01-02T05:00:00.000-08:00");
+      QueryGranularity periodOrigin = new PeriodGranularity(
+          new Period("P1M2D"),
+          origin,
+          DateTimeZone.forID("America/Los_Angeles")
+      );
+      assertSame(
+          Lists.newArrayList(
+              new DateTime("2011-11-30T05:00:00.000-08:00"),
+              new DateTime("2012-01-02T05:00:00.000-08:00"),
+              new DateTime("2012-02-04T05:00:00.000-08:00"),
+              new DateTime("2012-02-04T05:00:00.000-08:00")
+          ),
+          Lists.newArrayList(
+              periodOrigin.truncate(new DateTime("2012-01-01T05:00:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-01-02T07:00:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-03-01T07:20:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-02-04T05:00:00.000-08:00").getMillis())
+          )
+      );
 
-    QueryGranularity periodNoOrigin = new PeriodGranularity(new Period("P1M2D"),
-                                                            null,
-                                                            DateTimeZone.forID("America/Los_Angeles"));
-    assertSame(
-        Lists.newArrayList(
-            new DateTime("1970-01-01T00:00:00.000-08:00"),
-            new DateTime("2011-12-12T00:00:00.000-08:00"),
-            new DateTime("2012-01-14T00:00:00.000-08:00"),
-            new DateTime("2012-02-16T00:00:00.000-08:00")
-        ),
-        Lists.newArrayList(
-            periodNoOrigin.truncate(new DateTime("1970-01-01T05:02:04.123-08:00").getMillis()),
-            periodNoOrigin.truncate(new DateTime("2012-01-01T05:02:04.123-08:00").getMillis()),
-            periodNoOrigin.truncate(new DateTime("2012-01-15T07:01:04.123-08:00").getMillis()),
-            periodNoOrigin.truncate(new DateTime("2012-02-16T00:00:00.000-08:00").getMillis())
+      QueryGranularity periodNoOrigin = new PeriodGranularity(
+          new Period("P1M2D"),
+          null,
+          DateTimeZone.forID("America/Los_Angeles")
+      );
+      assertSame(
+          Lists.newArrayList(
+              new DateTime("1970-01-01T00:00:00.000-08:00"),
+              new DateTime("2011-12-12T00:00:00.000-08:00"),
+              new DateTime("2012-01-14T00:00:00.000-08:00"),
+              new DateTime("2012-02-16T00:00:00.000-08:00")
+          ),
+          Lists.newArrayList(
+              periodNoOrigin.truncate(new DateTime("1970-01-01T05:02:04.123-08:00").getMillis()),
+              periodNoOrigin.truncate(new DateTime("2012-01-01T05:02:04.123-08:00").getMillis()),
+              periodNoOrigin.truncate(new DateTime("2012-01-15T07:01:04.123-08:00").getMillis()),
+              periodNoOrigin.truncate(new DateTime("2012-02-16T00:00:00.000-08:00").getMillis())
 
-        )
-    );
+          )
+      );
+    }
+
+    {
+      final DateTime origin = new DateTime("2012-01-02T05:00:00.000-08:00");
+      QueryGranularity periodOrigin = new PeriodGranularity(
+          new Period("PT12H5M"),
+          origin,
+          DateTimeZone.forID("America/Los_Angeles")
+      );
+      assertSame(
+          Lists.newArrayList(
+              new DateTime("2012-01-01T04:50:00.000-08:00"),
+              new DateTime("2012-01-02T05:00:00.000-08:00"),
+              new DateTime("2012-01-02T17:05:00.000-08:00"),
+              new DateTime("2012-02-03T22:25:00.000-08:00")
+          ),
+          Lists.newArrayList(
+              periodOrigin.truncate(new DateTime("2012-01-01T05:00:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-01-02T07:00:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-01-03T00:20:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-02-03T22:25:00.000-08:00").getMillis())
+          )
+      );
+    }
   }
 
   @Test
   public void testCompoundPeriodMillisTruncate() throws Exception
   {
-    final DateTime origin = new DateTime("2012-01-02T05:00:00.000-08:00");
-    QueryGranularity periodOrigin = new PeriodGranularity(new Period("PT12H5M"),
-                                                          origin,
-                                                          DateTimeZone.forID("America/Los_Angeles"));
-    assertSame(
-        Lists.newArrayList(
-            new DateTime("2012-01-01T04:50:00.000-08:00"),
-            new DateTime("2012-01-02T05:00:00.000-08:00"),
-            new DateTime("2012-01-02T17:05:00.000-08:00"),
-            new DateTime("2012-02-03T22:25:00.000-08:00")
-        ),
-        Lists.newArrayList(
-            periodOrigin.truncate(new DateTime("2012-01-01T05:00:04.123-08:00").getMillis()),
-            periodOrigin.truncate(new DateTime("2012-01-02T07:00:04.123-08:00").getMillis()),
-            periodOrigin.truncate(new DateTime("2012-01-03T00:20:04.123-08:00").getMillis()),
-            periodOrigin.truncate(new DateTime("2012-02-03T22:25:00.000-08:00").getMillis())
-        )
-    );
+    {
+      final DateTime origin = new DateTime("2012-01-02T05:00:00.000-08:00");
+      QueryGranularity periodOrigin = new PeriodGranularity(
+          new Period("PT12H5M"),
+          origin,
+          DateTimeZone.UTC
+      );
+      assertSame(
+          Lists.newArrayList(
+              new DateTime("2012-01-01T04:50:00.000-08:00"),
+              new DateTime("2012-01-02T05:00:00.000-08:00"),
+              new DateTime("2012-01-02T17:05:00.000-08:00"),
+              new DateTime("2012-02-03T22:25:00.000-08:00")
+          ),
+          Lists.newArrayList(
+              periodOrigin.truncate(new DateTime("2012-01-01T05:00:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-01-02T07:00:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-01-03T00:20:04.123-08:00").getMillis()),
+              periodOrigin.truncate(new DateTime("2012-02-03T22:25:00.000-08:00").getMillis())
+          )
+      );
+    }
   }
+
+  @Test
+  public void testDurationTruncate() throws Exception
+  {
+    {
+      final DateTime origin = new DateTime("2012-01-02T05:00:00.000-08:00");
+      QueryGranularity gran = new DurationGranularity(
+          new Period("PT12H5M").toStandardDuration().getMillis(),
+          origin
+      );
+      assertSame(
+          Lists.newArrayList(
+              new DateTime("2012-01-01T04:50:00.000-08:00"),
+              new DateTime("2012-01-02T05:00:00.000-08:00"),
+              new DateTime("2012-01-02T17:05:00.000-08:00"),
+              new DateTime("2012-02-03T22:25:00.000-08:00")
+          ),
+          Lists.newArrayList(
+              gran.truncate(new DateTime("2012-01-01T05:00:04.123-08:00").getMillis()),
+              gran.truncate(new DateTime("2012-01-02T07:00:04.123-08:00").getMillis()),
+              gran.truncate(new DateTime("2012-01-03T00:20:04.123-08:00").getMillis()),
+              gran.truncate(new DateTime("2012-02-03T22:25:00.000-08:00").getMillis())
+          )
+      );
+    }
+  }
+
 
   @Test
   public void testIterableAllSimple() throws Exception
@@ -443,7 +620,7 @@ public class QueryGranularityTest
     json =   "{ \"type\": \"period\", \"period\": \"P1D\","
            + "\"timeZone\": \"America/Los_Angeles\", \"origin\": \"1970-01-01T00:00:00Z\"}";
     gran = mapper.readValue(json, QueryGranularity.class);
-    Assert.assertEquals(new PeriodGranularity(new Period("P1D"), new DateTime(0l), DateTimeZone.forID("America/Los_Angeles")), gran);
+    Assert.assertEquals(new PeriodGranularity(new Period("P1D"), new DateTime(0L), DateTimeZone.forID("America/Los_Angeles")), gran);
 
     QueryGranularity expected = new PeriodGranularity(
         new Period("P1D"),
@@ -509,6 +686,11 @@ public class QueryGranularityTest
     Assert.assertEquals(QueryGranularity.HOUR, mapper.readValue("\"hour\"", QueryGranularity.class));
     Assert.assertEquals(QueryGranularity.MINUTE, mapper.readValue("\"minute\"", QueryGranularity.class));
 
+    Assert.assertEquals(QueryGranularity.WEEK, mapper.readValue("\"week\"", QueryGranularity.class));
+    Assert.assertEquals(QueryGranularity.QUARTER, mapper.readValue("\"quarter\"", QueryGranularity.class));
+    Assert.assertEquals(QueryGranularity.MONTH, mapper.readValue("\"month\"", QueryGranularity.class));
+    Assert.assertEquals(QueryGranularity.YEAR, mapper.readValue("\"year\"", QueryGranularity.class));
+
     QueryGranularity gran = mapper.readValue("\"thirty_minute\"", QueryGranularity.class);
     Assert.assertEquals(new DurationGranularity(30 * 60 * 1000, null), gran);
 
@@ -524,7 +706,7 @@ public class QueryGranularityTest
 
     while (actualIter.hasNext() && expectedIter.hasNext()) {
       long a = actualIter.next().longValue();
-      Assert.assertEquals(expectedIter.next().getMillis(), a);
+      Assert.assertEquals(expectedIter.next(), new DateTime(a));
     }
     Assert.assertFalse("actualIter not exhausted!?", actualIter.hasNext());
     Assert.assertFalse("expectedIter not exhausted!?", expectedIter.hasNext());

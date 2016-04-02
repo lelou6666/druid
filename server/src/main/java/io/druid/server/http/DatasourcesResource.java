@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.server.http;
@@ -29,12 +29,20 @@ import com.google.inject.Inject;
 import com.metamx.common.MapUtils;
 import com.metamx.common.Pair;
 import com.metamx.common.guava.Comparators;
+import com.metamx.common.guava.FunctionalIterable;
+import com.metamx.common.logger.Logger;
+import io.druid.client.CoordinatorServerView;
 import io.druid.client.DruidDataSource;
 import io.druid.client.DruidServer;
-import io.druid.client.InventoryView;
+import io.druid.client.ImmutableSegmentLoadInfo;
+import io.druid.client.SegmentLoadInfo;
 import io.druid.client.indexing.IndexingServiceClient;
-import io.druid.db.DatabaseSegmentManager;
+import io.druid.metadata.MetadataSegmentManager;
+import io.druid.query.TableDataSource;
 import io.druid.timeline.DataSegment;
+import io.druid.timeline.TimelineLookup;
+import io.druid.timeline.TimelineObjectHolder;
+import io.druid.timeline.partition.PartitionChunk;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
@@ -47,26 +55,29 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 
 /**
  */
 @Path("/druid/coordinator/v1/datasources")
 public class DatasourcesResource
 {
-  private final InventoryView serverInventoryView;
-  private final DatabaseSegmentManager databaseSegmentManager;
+  private static final Logger log = new Logger(DatasourcesResource.class);
+
+  private final CoordinatorServerView serverInventoryView;
+  private final MetadataSegmentManager databaseSegmentManager;
   private final IndexingServiceClient indexingServiceClient;
 
   @Inject
   public DatasourcesResource(
-      InventoryView serverInventoryView,
-      DatabaseSegmentManager databaseSegmentManager,
+      CoordinatorServerView serverInventoryView,
+      MetadataSegmentManager databaseSegmentManager,
       @Nullable IndexingServiceClient indexingServiceClient
   )
   {
@@ -76,20 +87,21 @@ public class DatasourcesResource
   }
 
   @GET
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getQueryableDataSources(
       @QueryParam("full") String full,
       @QueryParam("simple") String simple
   )
   {
     Response.ResponseBuilder builder = Response.ok();
+    final Set<DruidDataSource> datasources = InventoryViewUtils.getDataSources(serverInventoryView);
     if (full != null) {
-      return builder.entity(getDataSources()).build();
+      return builder.entity(datasources).build();
     } else if (simple != null) {
       return builder.entity(
           Lists.newArrayList(
               Iterables.transform(
-                  getDataSources(),
+                  datasources,
                   new Function<DruidDataSource, Map<String, Object>>()
                   {
                     @Override
@@ -106,7 +118,7 @@ public class DatasourcesResource
     return builder.entity(
         Lists.newArrayList(
             Iterables.transform(
-                getDataSources(),
+                datasources,
                 new Function<DruidDataSource, String>()
                 {
                   @Override
@@ -122,13 +134,13 @@ public class DatasourcesResource
 
   @GET
   @Path("/{dataSourceName}")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getTheDataSource(
       @PathParam("dataSourceName") final String dataSourceName,
       @QueryParam("full") final String full
   )
   {
-    DruidDataSource dataSource = getDataSource(dataSourceName.toLowerCase());
+    DruidDataSource dataSource = getDataSource(dataSourceName);
     if (dataSource == null) {
       return Response.noContent().build();
     }
@@ -142,7 +154,7 @@ public class DatasourcesResource
 
   @POST
   @Path("/{dataSourceName}")
-  @Consumes("application/json")
+  @Consumes(MediaType.APPLICATION_JSON)
   public Response enableDataSource(
       @PathParam("dataSourceName") final String dataSourceName
   )
@@ -154,9 +166,16 @@ public class DatasourcesResource
     return Response.ok().build();
   }
 
+  /* When this method is removed, a new method needs to be introduced corresponding to
+    the end point "DELETE /druid/coordinator/v1/datasources/{dataSourceName}" (with no query parameters).
+    Ultimately we want to have no method with kill parameter -
+    DELETE `{dataSourceName}` will be used to disable datasource and
+    DELETE `{dataSourceName}/intervals/{interval}` will be used to nuke segments
+  */
   @DELETE
+  @Deprecated
   @Path("/{dataSourceName}")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response deleteDataSource(
       @PathParam("dataSourceName") final String dataSourceName,
       @QueryParam("kill") final String kill,
@@ -166,15 +185,30 @@ public class DatasourcesResource
     if (indexingServiceClient == null) {
       return Response.ok(ImmutableMap.of("error", "no indexing service found")).build();
     }
+
     if (kill != null && Boolean.valueOf(kill)) {
       try {
         indexingServiceClient.killSegments(dataSourceName, new Interval(interval));
+      }
+      catch (IllegalArgumentException e) {
+        return Response.status(Response.Status.BAD_REQUEST)
+                       .entity(
+                           ImmutableMap.of(
+                               "error",
+                               "Exception occurred. Probably the interval is invalid",
+                               "message",
+                               e.toString()
+                           )
+                       )
+                       .build();
       }
       catch (Exception e) {
         return Response.serverError().entity(
             ImmutableMap.of(
                 "error",
-                "Exception occurred. Are you sure you have an indexing service?"
+                "Exception occurred. Are you sure you have an indexing service?",
+                "message",
+                e.toString()
             )
         )
                        .build();
@@ -188,16 +222,44 @@ public class DatasourcesResource
     return Response.ok().build();
   }
 
+  @DELETE
+  @Path("/{dataSourceName}/intervals/{interval}")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response deleteDataSourceSpecificInterval(
+      @PathParam("dataSourceName") final String dataSourceName,
+      @PathParam("interval") final String interval
+  )
+  {
+    if (indexingServiceClient == null) {
+      return Response.ok(ImmutableMap.of("error", "no indexing service found")).build();
+    }
+    final Interval theInterval = new Interval(interval.replace("_", "/"));
+    try {
+      indexingServiceClient.killSegments(dataSourceName, new Interval(theInterval));
+    }
+    catch (Exception e) {
+      return Response.serverError()
+                     .entity(ImmutableMap.of(
+                         "error",
+                         "Exception occurred. Are you sure you have an indexing service?",
+                         "message",
+                         e.toString()
+                     ))
+                     .build();
+    }
+    return Response.ok().build();
+  }
+
   @GET
   @Path("/{dataSourceName}/intervals")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getSegmentDataSourceIntervals(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("simple") String simple,
       @QueryParam("full") String full
   )
   {
-    final DruidDataSource dataSource = getDataSource(dataSourceName.toLowerCase());
+    final DruidDataSource dataSource = getDataSource(dataSourceName);
 
     if (dataSource == null) {
       return Response.noContent().build();
@@ -250,7 +312,7 @@ public class DatasourcesResource
 
   @GET
   @Path("/{dataSourceName}/intervals/{interval}")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getSegmentDataSourceSpecificInterval(
       @PathParam("dataSourceName") String dataSourceName,
       @PathParam("interval") String interval,
@@ -258,10 +320,10 @@ public class DatasourcesResource
       @QueryParam("full") String full
   )
   {
-    final DruidDataSource dataSource = getDataSource(dataSourceName.toLowerCase());
+    final DruidDataSource dataSource = getDataSource(dataSourceName);
     final Interval theInterval = new Interval(interval.replace("_", "/"));
 
-    if (dataSource == null || interval == null) {
+    if (dataSource == null) {
       return Response.noContent().build();
     }
 
@@ -317,13 +379,13 @@ public class DatasourcesResource
 
   @GET
   @Path("/{dataSourceName}/segments")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getSegmentDataSourceSegments(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("full") String full
   )
   {
-    DruidDataSource dataSource = getDataSource(dataSourceName.toLowerCase());
+    DruidDataSource dataSource = getDataSource(dataSourceName);
     if (dataSource == null) {
       return Response.noContent().build();
     }
@@ -350,13 +412,13 @@ public class DatasourcesResource
 
   @GET
   @Path("/{dataSourceName}/segments/{segmentId}")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getSegmentDataSourceSegment(
       @PathParam("dataSourceName") String dataSourceName,
       @PathParam("segmentId") String segmentId
   )
   {
-    DruidDataSource dataSource = getDataSource(dataSourceName.toLowerCase());
+    DruidDataSource dataSource = getDataSource(dataSourceName);
     if (dataSource == null) {
       return Response.noContent().build();
     }
@@ -388,7 +450,7 @@ public class DatasourcesResource
 
   @POST
   @Path("/{dataSourceName}/segments/{segmentId}")
-  @Consumes("application/json")
+  @Consumes(MediaType.APPLICATION_JSON)
   public Response enableDatasourceSegment(
       @PathParam("dataSourceName") String dataSourceName,
       @PathParam("segmentId") String segmentId
@@ -403,7 +465,7 @@ public class DatasourcesResource
 
   @GET
   @Path("/{dataSourceName}/tiers")
-  @Produces("application/json")
+  @Produces(MediaType.APPLICATION_JSON)
   public Response getSegmentDataSourceTiers(
       @PathParam("dataSourceName") String dataSourceName
   )
@@ -461,38 +523,6 @@ public class DatasourcesResource
     ).addSegments(segmentMap);
   }
 
-  private Set<DruidDataSource> getDataSources()
-  {
-    TreeSet<DruidDataSource> dataSources = Sets.newTreeSet(
-        new Comparator<DruidDataSource>()
-        {
-          @Override
-          public int compare(DruidDataSource druidDataSource, DruidDataSource druidDataSource1)
-          {
-            return druidDataSource.getName().compareTo(druidDataSource1.getName());
-          }
-        }
-    );
-    dataSources.addAll(
-        Lists.newArrayList(
-            Iterables.concat(
-                Iterables.transform(
-                    serverInventoryView.getInventory(),
-                    new Function<DruidServer, Iterable<DruidDataSource>>()
-                    {
-                      @Override
-                      public Iterable<DruidDataSource> apply(DruidServer input)
-                      {
-                        return input.getDataSources();
-                      }
-                    }
-                )
-            )
-        )
-    );
-    return dataSources;
-  }
-
   private Pair<DataSegment, Set<String>> getSegment(String segmentId)
   {
     DataSegment theSegment = null;
@@ -528,50 +558,113 @@ public class DatasourcesResource
         "tiers", tiers,
         "segments", segments
     );
+    Set<String> totalDistinctSegments = Sets.newHashSet();
+    Map<String, HashSet<Object>> tierDistinctSegments = Maps.newHashMap();
 
-    int totalSegmentCount = 0;
     long totalSegmentSize = 0;
     long minTime = Long.MAX_VALUE;
     long maxTime = Long.MIN_VALUE;
+    String tier;
     for (DruidServer druidServer : serverInventoryView.getInventory()) {
       DruidDataSource druidDataSource = druidServer.getDataSource(dataSourceName);
+      tier = druidServer.getTier();
 
       if (druidDataSource == null) {
         continue;
       }
 
+      if (!tierDistinctSegments.containsKey(tier)) {
+        tierDistinctSegments.put(tier, Sets.newHashSet());
+      }
+
       long dataSourceSegmentSize = 0;
       for (DataSegment dataSegment : druidDataSource.getSegments()) {
-        dataSourceSegmentSize += dataSegment.getSize();
-        if (dataSegment.getInterval().getStartMillis() < minTime) {
-          minTime = dataSegment.getInterval().getStartMillis();
+        // tier segments stats
+        if (!tierDistinctSegments.get(tier).contains(dataSegment.getIdentifier())) {
+          dataSourceSegmentSize += dataSegment.getSize();
+          tierDistinctSegments.get(tier).add(dataSegment.getIdentifier());
         }
-        if (dataSegment.getInterval().getEndMillis() > maxTime) {
-          maxTime = dataSegment.getInterval().getEndMillis();
+        // total segments stats
+        if (!totalDistinctSegments.contains(dataSegment.getIdentifier())) {
+          totalSegmentSize += dataSegment.getSize();
+          totalDistinctSegments.add(dataSegment.getIdentifier());
+
+          if (dataSegment.getInterval().getStartMillis() < minTime) {
+            minTime = dataSegment.getInterval().getStartMillis();
+          }
+          if (dataSegment.getInterval().getEndMillis() > maxTime) {
+            maxTime = dataSegment.getInterval().getEndMillis();
+          }
         }
       }
 
-      // segment stats
-      totalSegmentCount += druidDataSource.getSegments().size();
-      totalSegmentSize += dataSourceSegmentSize;
-
       // tier stats
-      Map<String, Object> tierStats = (Map) tiers.get(druidServer.getTier());
+      Map<String, Object> tierStats = (Map) tiers.get(tier);
       if (tierStats == null) {
         tierStats = Maps.newHashMap();
         tiers.put(druidServer.getTier(), tierStats);
       }
-      int segmentCount = MapUtils.getInt(tierStats, "segmentCount", 0);
-      tierStats.put("segmentCount", segmentCount + druidDataSource.getSegments().size());
+      tierStats.put("segmentCount", tierDistinctSegments.get(tier).size());
 
       long segmentSize = MapUtils.getLong(tierStats, "size", 0L);
       tierStats.put("size", segmentSize + dataSourceSegmentSize);
     }
 
-    segments.put("count", totalSegmentCount);
+    segments.put("count", totalDistinctSegments.size());
     segments.put("size", totalSegmentSize);
     segments.put("minTime", new DateTime(minTime));
     segments.put("maxTime", new DateTime(maxTime));
     return retVal;
+  }
+
+  /**
+   * Provides serverView for a datasource and Interval which gives details about servers hosting segments for an interval
+   * Used by the realtime tasks to fetch a view of the interval they are interested in.
+   */
+  @GET
+  @Path("/{dataSourceName}/intervals/{interval}/serverview")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getSegmentDataSourceSpecificInterval(
+      @PathParam("dataSourceName") String dataSourceName,
+      @PathParam("interval") String interval,
+      @QueryParam("partial") final boolean partial
+  )
+  {
+    TimelineLookup<String, SegmentLoadInfo> timeline = serverInventoryView.getTimeline(
+        new TableDataSource(dataSourceName)
+    );
+    final Interval theInterval = new Interval(interval.replace("_", "/"));
+    if (timeline == null) {
+      log.debug("No timeline found for datasource[%s]", dataSourceName);
+      return Response.ok(Lists.<ImmutableSegmentLoadInfo>newArrayList()).build();
+    }
+
+    Iterable<TimelineObjectHolder<String, SegmentLoadInfo>> lookup = timeline.lookupWithIncompletePartitions(theInterval);
+    FunctionalIterable<ImmutableSegmentLoadInfo> retval = FunctionalIterable
+        .create(lookup).transformCat(
+            new Function<TimelineObjectHolder<String, SegmentLoadInfo>, Iterable<ImmutableSegmentLoadInfo>>()
+            {
+              @Override
+              public Iterable<ImmutableSegmentLoadInfo> apply(
+                  TimelineObjectHolder<String, SegmentLoadInfo> input
+              )
+              {
+                return Iterables.transform(
+                    input.getObject(),
+                    new Function<PartitionChunk<SegmentLoadInfo>, ImmutableSegmentLoadInfo>()
+                    {
+                      @Override
+                      public ImmutableSegmentLoadInfo apply(
+                          PartitionChunk<SegmentLoadInfo> chunk
+                      )
+                      {
+                        return chunk.getObject().toImmutableSegmentLoadInfo();
+                      }
+                    }
+                );
+              }
+            }
+        );
+    return Response.ok(retval).build();
   }
 }

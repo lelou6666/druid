@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.timeline;
@@ -27,7 +27,6 @@ import com.metamx.common.logger.Logger;
 import io.druid.timeline.partition.ImmutablePartitionHolder;
 import io.druid.timeline.partition.PartitionChunk;
 import io.druid.timeline.partition.PartitionHolder;
-import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import java.util.ArrayList;
@@ -42,23 +41,23 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * VersionedIntervalTimeline is a data structure that manages objects on a specific timeline.
- * <p/>
+ *
  * It associates a jodatime Interval and a generically-typed version with the object that is being stored.
- * <p/>
+ *
  * In the event of overlapping timeline entries, timeline intervals may be chunked. The underlying data associated
  * with a timeline entry remains unchanged when chunking occurs.
- * <p/>
+ *
  * After loading objects via the add() method, the lookup(Interval) method can be used to get the list of the most
  * recent objects (according to the version) that match the given interval.  The intent is that objects represent
  * a certain time period and when you do a lookup(), you are asking for all of the objects that you need to look
  * at in order to get a correct answer about that time period.
- * <p/>
+ *
  * The findOvershadowed() method returns a list of objects that will never be returned by a call to lookup() because
  * they are overshadowed by some other object.  This can be used in conjunction with the add() and remove() methods
  * to achieve "atomic" updates.  First add new items, then check if those items caused anything to be overshadowed, if
  * so, remove the overshadowed elements and you have effectively updated your data set without any user impact.
  */
-public class VersionedIntervalTimeline<VersionType, ObjectType>
+public class VersionedIntervalTimeline<VersionType, ObjectType> implements TimelineLookup<VersionType, ObjectType>
 {
   private static final Logger log = new Logger(VersionedIntervalTimeline.class);
 
@@ -187,6 +186,18 @@ public class VersionedIntervalTimeline<VersionType, ObjectType>
     try {
       lock.readLock().lock();
       return lookup(interval, false);
+    }
+    finally {
+      lock.readLock().unlock();
+    }
+  }
+
+  @Override
+  public Iterable<TimelineObjectHolder<VersionType, ObjectType>> lookupWithIncompletePartitions(Interval interval)
+  {
+    try {
+      lock.readLock().lock();
+      return lookup(interval, true);
     }
     finally {
       lock.readLock().unlock();
@@ -500,10 +511,5 @@ public class VersionedIntervalTimeline<VersionType, ObjectType>
     {
       return partitionHolder;
     }
-  }
-
-  public static void main(String[] args)
-  {
-    System.out.println(new Interval(new DateTime(), (DateTime) null));
   }
 }

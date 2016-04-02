@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.search;
@@ -25,11 +25,15 @@ import io.druid.query.Result;
 import io.druid.query.search.search.LexicographicSearchSortSpec;
 import io.druid.query.search.search.SearchHit;
 import io.druid.query.search.search.StrlenSearchSortSpec;
-import junit.framework.Assert;
 import org.joda.time.DateTime;
+import org.junit.Assert;
 import org.junit.Test;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
+import java.util.List;
 
 /**
  */
@@ -218,49 +222,64 @@ public class SearchBinaryFnTest
   @Test
   public void testStrlenMerge()
   {
+    StrlenSearchSortSpec searchSortSpec = new StrlenSearchSortSpec();
+    Comparator<SearchHit> c = searchSortSpec.getComparator();
+
     Result<SearchResultValue> r1 = new Result<SearchResultValue>(
         currTime,
-        new SearchResultValue(
-            ImmutableList.<SearchHit>of(
-                new SearchHit(
-                    "blah",
-                    "thisislong"
-                )
-            )
-        )
+        new SearchResultValue(toHits(c, "blah:thisislong"))
     );
 
     Result<SearchResultValue> r2 = new Result<SearchResultValue>(
         currTime,
-        new SearchResultValue(
-            ImmutableList.<SearchHit>of(
-                new SearchHit(
-                    "blah",
-                    "short"
-                )
-            )
-        )
+        new SearchResultValue(toHits(c, "blah:short"))
     );
 
     Result<SearchResultValue> expected = new Result<SearchResultValue>(
         currTime,
-        new SearchResultValue(
-            ImmutableList.<SearchHit>of(
-                new SearchHit(
-                    "blah",
-                    "short"
-                ),
-                new SearchHit(
-                    "blah",
-                    "thisislong"
-                )
-            )
-        )
+        new SearchResultValue(toHits(c, "blah:short", "blah:thisislong"))
     );
 
-    Result<SearchResultValue> actual = new SearchBinaryFn(new StrlenSearchSortSpec(), QueryGranularity.ALL, Integer.MAX_VALUE).apply(r1, r2);
+    Result<SearchResultValue> actual = new SearchBinaryFn(searchSortSpec, QueryGranularity.ALL, Integer.MAX_VALUE).apply(r1, r2);
     Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertSearchMergeResult(expected.getValue(), actual.getValue());
+  }
+
+  @Test
+  public void testStrlenMerge2()
+  {
+    StrlenSearchSortSpec searchSortSpec = new StrlenSearchSortSpec();
+    Comparator<SearchHit> c = searchSortSpec.getComparator();
+
+    Result<SearchResultValue> r1 = new Result<SearchResultValue>(
+        currTime,
+        new SearchResultValue(toHits(c, "blah:short", "blah:thisislong", "blah2:thisislong"))
+    );
+
+    Result<SearchResultValue> r2 = new Result<SearchResultValue>(
+        currTime,
+        new SearchResultValue(toHits(c, "blah:short", "blah2:thisislong"))
+    );
+
+    Result<SearchResultValue> expected = new Result<SearchResultValue>(
+        currTime,
+        new SearchResultValue(toHits(c, "blah:short", "blah:thisislong", "blah2:thisislong"))
+    );
+
+    Result<SearchResultValue> actual = new SearchBinaryFn(searchSortSpec, QueryGranularity.ALL, Integer.MAX_VALUE).apply(r1, r2);
+    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    assertSearchMergeResult(expected.getValue(), actual.getValue());
+  }
+
+  // merge function expects input to be sorted as per comparator
+  private List<SearchHit> toHits(Comparator<SearchHit> comparator, String... hits) {
+    List<SearchHit> result = new ArrayList<>();
+    for (String hit : hits) {
+      int index = hit.indexOf(':');
+      result.add(new SearchHit(hit.substring(0, index), hit.substring(index + 1)));
+    }
+    Collections.sort(result, comparator);
+    return result;
   }
 
   @Test

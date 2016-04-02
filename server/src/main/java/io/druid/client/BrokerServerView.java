@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.client;
@@ -25,17 +25,18 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.inject.Inject;
 import com.metamx.common.logger.Logger;
+import com.metamx.emitter.service.ServiceEmitter;
 import com.metamx.http.client.HttpClient;
 import io.druid.client.selector.QueryableDruidServer;
 import io.druid.client.selector.ServerSelector;
 import io.druid.client.selector.TierSelectorStrategy;
 import io.druid.concurrent.Execs;
 import io.druid.guice.annotations.Client;
+import io.druid.guice.annotations.Smile;
 import io.druid.query.DataSource;
-import io.druid.query.QueryDataSource;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChestWarehouse;
-import io.druid.query.TableDataSource;
+import io.druid.query.QueryWatcher;
 import io.druid.server.coordination.DruidServerMetadata;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.VersionedIntervalTimeline;
@@ -60,25 +61,36 @@ public class BrokerServerView implements TimelineServerView
   private final Map<String, VersionedIntervalTimeline<String, ServerSelector>> timelines;
 
   private final QueryToolChestWarehouse warehouse;
+  private final QueryWatcher queryWatcher;
   private final ObjectMapper smileMapper;
   private final HttpClient httpClient;
   private final ServerInventoryView baseView;
   private final TierSelectorStrategy tierSelectorStrategy;
+  private final ServiceEmitter emitter;
+  private final BrokerSegmentWatcherConfig segmentWatcherConfig;
+
+  private volatile boolean initialized = false;
 
   @Inject
   public BrokerServerView(
       QueryToolChestWarehouse warehouse,
-      ObjectMapper smileMapper,
+      QueryWatcher queryWatcher,
+      @Smile ObjectMapper smileMapper,
       @Client HttpClient httpClient,
       ServerInventoryView baseView,
-      TierSelectorStrategy tierSelectorStrategy
+      TierSelectorStrategy tierSelectorStrategy,
+      ServiceEmitter emitter,
+      BrokerSegmentWatcherConfig segmentWatcherConfig
   )
   {
     this.warehouse = warehouse;
+    this.queryWatcher = queryWatcher;
     this.smileMapper = smileMapper;
     this.httpClient = httpClient;
     this.baseView = baseView;
     this.tierSelectorStrategy = tierSelectorStrategy;
+    this.emitter = emitter;
+    this.segmentWatcherConfig = segmentWatcherConfig;
 
     this.clients = Maps.newConcurrentMap();
     this.selectors = Maps.newHashMap();
@@ -102,6 +114,13 @@ public class BrokerServerView implements TimelineServerView
             serverRemovedSegment(server, segment);
             return ServerView.CallbackAction.CONTINUE;
           }
+
+          @Override
+          public CallbackAction segmentViewInitialized()
+          {
+            initialized = true;
+            return ServerView.CallbackAction.CONTINUE;
+          }
         }
     );
 
@@ -117,6 +136,11 @@ public class BrokerServerView implements TimelineServerView
           }
         }
     );
+  }
+
+  public boolean isInitialized()
+  {
+    return initialized;
   }
 
   public void clear()
@@ -154,7 +178,7 @@ public class BrokerServerView implements TimelineServerView
 
   private DirectDruidClient makeDirectClient(DruidServer server)
   {
-    return new DirectDruidClient(warehouse, smileMapper, httpClient, server.getHost());
+    return new DirectDruidClient(warehouse, queryWatcher, smileMapper, httpClient, server.getHost(), emitter);
   }
 
   private QueryableDruidServer removeServer(DruidServer server)
@@ -167,6 +191,11 @@ public class BrokerServerView implements TimelineServerView
 
   private void serverAddedSegment(final DruidServerMetadata server, final DataSegment segment)
   {
+    if (segmentWatcherConfig.getWatchedTiers() != null && !segmentWatcherConfig.getWatchedTiers()
+                                                                               .contains(server.getTier())) {
+      return;
+    }
+
     String segmentId = segment.getIdentifier();
     synchronized (lock) {
       log.debug("Adding segment[%s] for server[%s]", segment, server);
@@ -189,12 +218,17 @@ public class BrokerServerView implements TimelineServerView
       if (queryableDruidServer == null) {
         queryableDruidServer = addServer(baseView.getInventoryValue(server.getName()));
       }
-      selector.addServer(queryableDruidServer);
+      selector.addServerAndUpdateSegment(queryableDruidServer, segment);
     }
   }
 
   private void serverRemovedSegment(DruidServerMetadata server, DataSegment segment)
   {
+    if (segmentWatcherConfig.getWatchedTiers() != null && !segmentWatcherConfig.getWatchedTiers()
+                                                                               .contains(server.getTier())) {
+      return;
+    }
+
     String segmentId = segment.getIdentifier();
     final ServerSelector selector;
 

@@ -1,21 +1,20 @@
-
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.segment.incremental;
@@ -23,13 +22,18 @@ package io.druid.segment.incremental;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.base.Splitter;
+import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.primitives.Ints;
 import com.metamx.collections.spatial.search.Bound;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
 import io.druid.granularity.QueryGranularity;
-import io.druid.query.aggregation.Aggregator;
+import io.druid.query.QueryInterruptedException;
+import io.druid.query.dimension.DimensionSpec;
+import io.druid.query.extraction.ExtractionFn;
 import io.druid.query.filter.Filter;
 import io.druid.query.filter.ValueMatcher;
 import io.druid.query.filter.ValueMatcherFactory;
@@ -37,9 +41,14 @@ import io.druid.segment.Capabilities;
 import io.druid.segment.Cursor;
 import io.druid.segment.DimensionSelector;
 import io.druid.segment.FloatColumnSelector;
+import io.druid.segment.LongColumnSelector;
+import io.druid.segment.Metadata;
+import io.druid.segment.NullDimensionSelector;
 import io.druid.segment.ObjectColumnSelector;
+import io.druid.segment.SingleScanTimeDimSelector;
 import io.druid.segment.StorageAdapter;
-import io.druid.segment.TimestampColumnSelector;
+import io.druid.segment.column.Column;
+import io.druid.segment.column.ColumnCapabilities;
 import io.druid.segment.data.Indexed;
 import io.druid.segment.data.IndexedInts;
 import io.druid.segment.data.ListIndexed;
@@ -50,7 +59,9 @@ import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +72,7 @@ import java.util.concurrent.ConcurrentNavigableMap;
 public class IncrementalIndexStorageAdapter implements StorageAdapter
 {
   private static final Splitter SPLITTER = Splitter.on(",");
+  private static final NullDimensionSelector NULL_DIMENSION_SELECTOR = new NullDimensionSelector();
 
   private final IncrementalIndex index;
 
@@ -86,7 +98,7 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
   @Override
   public Indexed<String> getAvailableDimensions()
   {
-    return new ListIndexed<String>(index.getDimensions(), String.class);
+    return new ListIndexed<String>(index.getDimensionNames(), String.class);
   }
 
   @Override
@@ -98,11 +110,20 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
   @Override
   public int getDimensionCardinality(String dimension)
   {
-    IncrementalIndex.DimDim dimDim = index.getDimension(dimension.toLowerCase());
+    if (dimension.equals(Column.TIME_COLUMN_NAME)) {
+      return Integer.MAX_VALUE;
+    }
+    IncrementalIndex.DimDim dimDim = index.getDimensionValues(dimension);
     if (dimDim == null) {
       return 0;
     }
     return dimDim.size();
+  }
+
+  @Override
+  public int getNumRows()
+  {
+    return index.size();
   }
 
   @Override
@@ -118,13 +139,46 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
   }
 
   @Override
+  public Comparable getMinValue(String column)
+  {
+    IncrementalIndex.DimDim dimDim = index.getDimensionValues(column);
+    return dimDim == null ? null : dimDim.getMinValue();
+  }
+
+  @Override
+  public Comparable getMaxValue(String column)
+  {
+    IncrementalIndex.DimDim dimDim = index.getDimensionValues(column);
+    return dimDim == null ? null : dimDim.getMaxValue();
+  }
+
+  @Override
   public Capabilities getCapabilities()
   {
     return Capabilities.builder().dimensionValuesSorted(false).build();
   }
 
   @Override
-  public Sequence<Cursor> makeCursors(final Filter filter, final Interval interval, final QueryGranularity gran)
+  public ColumnCapabilities getColumnCapabilities(String column)
+  {
+    return index.getCapabilities(column);
+  }
+
+  @Override
+  public String getColumnTypeName(String column)
+  {
+    final String metricType = index.getMetricType(column);
+    return metricType != null ? metricType : getColumnCapabilities(column).getType().toString();
+  }
+
+  @Override
+  public DateTime getMaxIngestedEventTime()
+  {
+    return index.getMaxIngestedEventTime();
+  }
+
+  @Override
+  public Sequence<Cursor> makeCursors(final Filter filter, final Interval interval, final QueryGranularity gran, final boolean descending)
   {
     if (index.isEmpty()) {
       return Sequences.empty();
@@ -132,8 +186,11 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
 
     Interval actualIntervalTmp = interval;
 
+    final Interval dataInterval = new Interval(
+        getMinTime().getMillis(),
+        gran.next(gran.truncate(getMaxTime().getMillis()))
+    );
 
-    final Interval dataInterval = new Interval(getMinTime().getMillis(), gran.next(getMaxTime().getMillis()));
     if (!actualIntervalTmp.overlaps(dataInterval)) {
       return Sequences.empty();
     }
@@ -147,8 +204,13 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
 
     final Interval actualInterval = actualIntervalTmp;
 
+    Iterable<Long> iterable = gran.iterable(actualInterval.getStartMillis(), actualInterval.getEndMillis());
+    if (descending) {
+      // might be better to be included in granularity#iterable
+      iterable = Lists.reverse(ImmutableList.copyOf(iterable));
+    }
     return Sequences.map(
-        Sequences.simple(gran.iterable(actualInterval.getStartMillis(), actualInterval.getEndMillis())),
+        Sequences.simple(iterable),
         new Function<Long, Cursor>()
         {
           EntryHolder currEntry = new EntryHolder();
@@ -165,8 +227,8 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
 
             return new Cursor()
             {
-              private Iterator<Map.Entry<IncrementalIndex.TimeAndDims, Aggregator[]>> baseIter;
-              private ConcurrentNavigableMap<IncrementalIndex.TimeAndDims, Aggregator[]> cursorMap;
+              private Iterator<Map.Entry<IncrementalIndex.TimeAndDims, Integer>> baseIter;
+              private ConcurrentNavigableMap<IncrementalIndex.TimeAndDims, Integer> cursorMap;
               final DateTime time;
               int numAdvanced = -1;
               boolean done;
@@ -174,12 +236,15 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
               {
                 cursorMap = index.getSubMap(
                     new IncrementalIndex.TimeAndDims(
-                        timeStart, new String[][]{}
+                        timeStart, new int[][]{}, null
                     ),
                     new IncrementalIndex.TimeAndDims(
-                        Math.min(actualInterval.getEndMillis(), gran.next(input)), new String[][]{}
+                        Math.min(actualInterval.getEndMillis(), gran.next(input)), new int[][]{}, null
                     )
                 );
+                if (descending) {
+                  cursorMap = cursorMap.descendingMap();
+                }
                 time = gran.toDateTime(input);
 
                 reset();
@@ -200,6 +265,10 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                 }
 
                 while (baseIter.hasNext()) {
+                  if (Thread.interrupted()) {
+                    throw new QueryInterruptedException(new InterruptedException());
+                  }
+
                   currEntry.set(baseIter.next());
 
                   if (filterMatcher.matches()) {
@@ -239,6 +308,10 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                   Iterators.advance(baseIter, numAdvanced);
                 }
 
+                if (Thread.interrupted()) {
+                  throw new QueryInterruptedException( new InterruptedException());
+                }
+
                 boolean foundMatched = false;
                 while (baseIter.hasNext()) {
                   currEntry.set(baseIter.next());
@@ -254,48 +327,61 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
               }
 
               @Override
-              public TimestampColumnSelector makeTimestampColumnSelector()
+              public DimensionSelector makeDimensionSelector(
+                  DimensionSpec dimensionSpec
+              )
               {
-                return new TimestampColumnSelector()
-                {
-                  @Override
-                  public long getTimestamp()
-                  {
-                    return currEntry.getKey().getTimestamp();
-                  }
-                };
+                return dimensionSpec.decorate(makeDimensionSelectorUndecorated(dimensionSpec));
               }
 
-              @Override
-              public DimensionSelector makeDimensionSelector(String dimension)
+              private DimensionSelector makeDimensionSelectorUndecorated(
+                  DimensionSpec dimensionSpec
+              )
               {
-                final String dimensionName = dimension.toLowerCase();
-                final IncrementalIndex.DimDim dimValLookup = index.getDimension(dimensionName);
-                if (dimValLookup == null) {
-                  return null;
+                final String dimension = dimensionSpec.getDimension();
+                final ExtractionFn extractionFn = dimensionSpec.getExtractionFn();
+
+                if (dimension.equals(Column.TIME_COLUMN_NAME)) {
+                  return new SingleScanTimeDimSelector(makeLongColumnSelector(dimension), extractionFn, descending);
                 }
 
+                final IncrementalIndex.DimensionDesc dimensionDesc = index.getDimension(dimension);
+                if (dimensionDesc == null) {
+                  return NULL_DIMENSION_SELECTOR;
+                }
+
+                final int dimIndex = dimensionDesc.getIndex();
+                final IncrementalIndex.DimDim dimValLookup = dimensionDesc.getValues();
+
                 final int maxId = dimValLookup.size();
-                final int dimIndex = index.getDimensionIndex(dimensionName);
 
                 return new DimensionSelector()
                 {
                   @Override
                   public IndexedInts getRow()
                   {
-                    final ArrayList<Integer> vals = Lists.newArrayList();
-                    if (dimIndex < currEntry.getKey().getDims().length) {
-                      final String[] dimVals = currEntry.getKey().getDims()[dimIndex];
-                      if (dimVals != null) {
-                        for (String dimVal : dimVals) {
-                          int id = dimValLookup.getId(dimVal);
-                          if (id < maxId) {
-                            vals.add(id);
-                          }
+                    final int[][] dims = currEntry.getKey().getDims();
+
+                    int[] indices = dimIndex < dims.length ? dims[dimIndex] : null;
+
+                    List<Integer> valsTmp = null;
+                    if ((indices == null || indices.length == 0) && dimValLookup.contains(null)) {
+                      int id = dimValLookup.getId(null);
+                      if (id < maxId) {
+                        valsTmp = new ArrayList<>(1);
+                        valsTmp.add(id);
+                      }
+                    } else if (indices != null && indices.length > 0) {
+                      valsTmp = new ArrayList<>(indices.length);
+                      for (int i = 0; i < indices.length; i++) {
+                        int id = indices[i];
+                        if (id < maxId) {
+                          valsTmp.add(id);
                         }
                       }
                     }
 
+                    final List<Integer> vals = valsTmp == null ? Collections.EMPTY_LIST : valsTmp;
                     return new IndexedInts()
                     {
                       @Override
@@ -315,6 +401,18 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                       {
                         return vals.iterator();
                       }
+
+                      @Override
+                      public void fill(int index, int[] toFill)
+                      {
+                        throw new UnsupportedOperationException("fill not supported");
+                      }
+
+                      @Override
+                      public void close() throws IOException
+                      {
+
+                      }
                     };
                   }
 
@@ -327,12 +425,21 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                   @Override
                   public String lookupName(int id)
                   {
-                    return dimValLookup.getValue(id);
+                    // TODO: needs update to DimensionSelector interface to allow multi-types, just use Strings for now
+                    final Comparable value = dimValLookup.getValue(id);
+                    final String strValue = value == null ? null : value.toString();
+                    return extractionFn == null ? strValue : extractionFn.apply(strValue);
+
                   }
 
                   @Override
                   public int lookupId(String name)
                   {
+                    if (extractionFn != null) {
+                      throw new UnsupportedOperationException(
+                          "cannot perform lookup when applying an extraction function"
+                      );
+                    }
                     return dimValLookup.getId(name);
                   }
                 };
@@ -341,8 +448,7 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
               @Override
               public FloatColumnSelector makeFloatColumnSelector(String columnName)
               {
-                final String metricName = columnName.toLowerCase();
-                final Integer metricIndexInt = index.getMetricIndex(metricName);
+                final Integer metricIndexInt = index.getMetricIndex(columnName);
                 if (metricIndexInt == null) {
                   return new FloatColumnSelector()
                   {
@@ -355,13 +461,52 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                 }
 
                 final int metricIndex = metricIndexInt;
-
                 return new FloatColumnSelector()
                 {
                   @Override
                   public float get()
                   {
-                    return currEntry.getValue()[metricIndex].getFloat();
+                    return index.getMetricFloatValue(currEntry.getValue(), metricIndex);
+                  }
+                };
+              }
+
+              @Override
+              public LongColumnSelector makeLongColumnSelector(String columnName)
+              {
+                if (columnName.equals(Column.TIME_COLUMN_NAME)) {
+                  return new LongColumnSelector()
+                  {
+                    @Override
+                    public long get()
+                    {
+                      return currEntry.getKey().getTimestamp();
+                    }
+                  };
+                }
+                final Integer metricIndexInt = index.getMetricIndex(columnName);
+                if (metricIndexInt == null) {
+                  return new LongColumnSelector()
+                  {
+                    @Override
+                    public long get()
+                    {
+                      return 0L;
+                    }
+                  };
+                }
+
+                final int metricIndex = metricIndexInt;
+
+                return new LongColumnSelector()
+                {
+                  @Override
+                  public long get()
+                  {
+                    return index.getMetricLongValue(
+                        currEntry.getValue(),
+                        metricIndex
+                    );
                   }
                 };
               }
@@ -369,14 +514,28 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
               @Override
               public ObjectColumnSelector makeObjectColumnSelector(String column)
               {
-                final String columnName = column.toLowerCase();
-                final Integer metricIndexInt = index.getMetricIndex(columnName);
+                if (column.equals(Column.TIME_COLUMN_NAME)) {
+                  return new ObjectColumnSelector<Long>()
+                  {
+                    @Override
+                    public Class classOfObject()
+                    {
+                      return Long.TYPE;
+                    }
 
+                    @Override
+                    public Long get()
+                    {
+                      return currEntry.getKey().getTimestamp();
+                    }
+                  };
+                }
+
+                final Integer metricIndexInt = index.getMetricIndex(column);
                 if (metricIndexInt != null) {
                   final int metricIndex = metricIndexInt;
 
-                  final ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(index.getMetricType(columnName));
-
+                  final ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(index.getMetricType(column));
                   return new ObjectColumnSelector()
                   {
                     @Override
@@ -388,15 +547,21 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                     @Override
                     public Object get()
                     {
-                      return currEntry.getValue()[metricIndex].get();
+                      return index.getMetricObjectValue(
+                          currEntry.getValue(),
+                          metricIndex
+                      );
                     }
                   };
                 }
 
-                final Integer dimensionIndexInt = index.getDimensionIndex(columnName);
+                IncrementalIndex.DimensionDesc dimensionDesc = index.getDimension(column);
 
-                if (dimensionIndexInt != null) {
-                  final int dimensionIndex = dimensionIndexInt;
+                if (dimensionDesc != null) {
+
+                  final int dimensionIndex = dimensionDesc.getIndex();
+                  final IncrementalIndex.DimDim dimDim = dimensionDesc.getValues();
+
                   return new ObjectColumnSelector<Object>()
                   {
                     @Override
@@ -408,16 +573,28 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
                     @Override
                     public Object get()
                     {
-                      final String[] dimVals = currEntry.getKey().getDims()[dimensionIndex];
-                      if (dimVals.length == 1) {
-                        return dimVals[0];
-                      }
-                      else if (dimVals.length == 0) {
+                      IncrementalIndex.TimeAndDims key = currEntry.getKey();
+                      if (key == null) {
                         return null;
                       }
-                      else {
-                        return dimVals;
+
+                      int[][] dims = key.getDims();
+                      if (dimensionIndex >= dims.length) {
+                        return null;
                       }
+
+                      final int[] dimIdx = dims[dimensionIndex];
+                      if (dimIdx == null || dimIdx.length == 0) {
+                        return null;
+                      }
+                      if (dimIdx.length == 1) {
+                        return dimDim.getValue(dimIdx[0]);
+                      }
+                      Comparable[] dimVals = new String[dimIdx.length];
+                      for (int i = 0; i < dimIdx.length; i++) {
+                        dimVals[i] = dimDim.getValue(dimIdx[i]);
+                      }
+                      return dimVals;
                     }
                   };
                 }
@@ -430,6 +607,14 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
     );
   }
 
+  private boolean isComparableNullOrEmpty(final Comparable value)
+  {
+    if (value instanceof String) {
+      return Strings.isNullOrEmpty((String) value);
+    }
+    return value == null;
+  }
+
   private ValueMatcher makeFilterMatcher(final Filter filter, final EntryHolder holder)
   {
     return filter == null
@@ -439,16 +624,15 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
 
   private static class EntryHolder
   {
-    Map.Entry<IncrementalIndex.TimeAndDims, Aggregator[]> currEntry = null;
+    Map.Entry<IncrementalIndex.TimeAndDims, Integer> currEntry = null;
 
-    public Map.Entry<IncrementalIndex.TimeAndDims, Aggregator[]> get()
+    public Map.Entry<IncrementalIndex.TimeAndDims, Integer> get()
     {
       return currEntry;
     }
 
-    public void set(Map.Entry<IncrementalIndex.TimeAndDims, Aggregator[]> currEntry)
+    public void set(Map.Entry<IncrementalIndex.TimeAndDims, Integer> currEntry)
     {
-      this.currEntry = currEntry;
       this.currEntry = currEntry;
     }
 
@@ -457,7 +641,7 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
       return currEntry.getKey();
     }
 
-    public Aggregator[] getValue()
+    public Integer getValue()
     {
       return currEntry.getValue();
     }
@@ -475,23 +659,24 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
     }
 
     @Override
-    public ValueMatcher makeValueMatcher(String dimension, String value)
+    public ValueMatcher makeValueMatcher(String dimension, final Comparable value)
     {
-      Integer dimIndexObject = index.getDimensionIndex(dimension.toLowerCase());
-      if (dimIndexObject == null) {
-        return new BooleanValueMatcher(false);
+      IncrementalIndex.DimensionDesc dimensionDesc = index.getDimension(dimension);
+      if (dimensionDesc == null) {
+        return new BooleanValueMatcher(isComparableNullOrEmpty(value));
       }
-      String idObject = index.getDimension(dimension.toLowerCase()).get(value);
-      if (idObject == null) {
-        if (value == null || "".equals(value)) {
-          final int dimIndex = dimIndexObject;
+      final int dimIndex = dimensionDesc.getIndex();
+      final IncrementalIndex.DimDim dimDim = dimensionDesc.getValues();
 
+      final Integer id = dimDim.getId(value);
+      if (id == null) {
+        if (isComparableNullOrEmpty(value)) {
           return new ValueMatcher()
           {
             @Override
             public boolean matches()
             {
-              String[][] dims = holder.getKey().getDims();
+              int[][] dims = holder.getKey().getDims();
               if (dimIndex >= dims.length || dims[dimIndex] == null) {
                 return true;
               }
@@ -502,50 +687,43 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
         return new BooleanValueMatcher(false);
       }
 
-      final int dimIndex = dimIndexObject;
-      final String id = idObject;
-
       return new ValueMatcher()
       {
         @Override
         public boolean matches()
         {
-          String[][] dims = holder.getKey().getDims();
+          int[][] dims = holder.getKey().getDims();
           if (dimIndex >= dims.length || dims[dimIndex] == null) {
-            return false;
+            return isComparableNullOrEmpty(value);
           }
 
-          for (String dimVal : dims[dimIndex]) {
-            if (id == dimVal) {
-              return true;
-            }
-          }
-          return false;
+          return Ints.indexOf(dims[dimIndex], id) >= 0;
         }
       };
     }
 
     @Override
-    public ValueMatcher makeValueMatcher(String dimension, final Predicate<String> predicate)
+    public ValueMatcher makeValueMatcher(String dimension, final Predicate predicate)
     {
-      Integer dimIndexObject = index.getDimensionIndex(dimension.toLowerCase());
-      if (dimIndexObject == null) {
-        return new BooleanValueMatcher(false);
+      IncrementalIndex.DimensionDesc dimensionDesc = index.getDimension(dimension);
+      if (dimensionDesc == null) {
+        return new BooleanValueMatcher(predicate.apply(null));
       }
-      final int dimIndex = dimIndexObject;
+      final int dimIndex = dimensionDesc.getIndex();
+      final IncrementalIndex.DimDim dimDim = dimensionDesc.getValues();
 
       return new ValueMatcher()
       {
         @Override
         public boolean matches()
         {
-          String[][] dims = holder.getKey().getDims();
+          int[][] dims = holder.getKey().getDims();
           if (dimIndex >= dims.length || dims[dimIndex] == null) {
-            return false;
+            return predicate.apply(null);
           }
 
-          for (String dimVal : dims[dimIndex]) {
-            if (predicate.apply(dimVal)) {
+          for (int dimVal : dims[dimIndex]) {
+            if (predicate.apply(dimDim.getValue(dimVal))) {
               return true;
             }
           }
@@ -553,43 +731,11 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
         }
       };
     }
+  }
 
-    @Override
-    public ValueMatcher makeValueMatcher(final String dimension, final Bound bound)
-    {
-      if (!dimension.endsWith(".geo")) {
-        return new BooleanValueMatcher(false);
-      }
-
-      Integer dimIndexObject = index.getDimensionIndex(dimension.toLowerCase());
-      if (dimIndexObject == null) {
-        return new BooleanValueMatcher(false);
-      }
-      final int dimIndex = dimIndexObject;
-
-      return new ValueMatcher()
-      {
-        @Override
-        public boolean matches()
-        {
-          String[][] dims = holder.getKey().getDims();
-          if (dimIndex >= dims.length || dims[dimIndex] == null) {
-            return false;
-          }
-
-          for (String dimVal : dims[dimIndex]) {
-            List<String> stringCoords = Lists.newArrayList(SPLITTER.split(dimVal));
-            float[] coords = new float[stringCoords.size()];
-            for (int j = 0; j < coords.length; j++) {
-              coords[j] = Float.valueOf(stringCoords.get(j));
-            }
-            if (bound.contains(coords)) {
-              return true;
-            }
-          }
-          return false;
-        }
-      };
-    }
+  @Override
+  public Metadata getMetadata()
+  {
+    return index.getMetadata();
   }
 }

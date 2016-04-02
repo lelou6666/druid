@@ -1,48 +1,77 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.client.cache;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Suppliers;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.primitives.Ints;
+import com.google.inject.Binder;
+import com.google.inject.Inject;
+import com.google.inject.Injector;
+import com.google.inject.Module;
+import com.google.inject.name.Names;
+import com.metamx.common.lifecycle.Lifecycle;
+import com.metamx.common.logger.Logger;
+import com.metamx.emitter.core.Emitter;
+import com.metamx.emitter.core.Event;
+import com.metamx.emitter.service.ServiceEmitter;
+import com.metamx.metrics.AbstractMonitor;
+import io.druid.collections.ResourceHolder;
+import io.druid.collections.StupidResourceHolder;
+import io.druid.guice.GuiceInjectors;
+import io.druid.guice.JsonConfigProvider;
+import io.druid.guice.ManageLifecycle;
+import io.druid.initialization.Initialization;
+import io.druid.jackson.DefaultObjectMapper;
+import net.spy.memcached.BroadcastOpFactory;
 import net.spy.memcached.CASResponse;
 import net.spy.memcached.CASValue;
 import net.spy.memcached.CachedData;
 import net.spy.memcached.ConnectionObserver;
 import net.spy.memcached.MemcachedClientIF;
+import net.spy.memcached.MemcachedNode;
 import net.spy.memcached.NodeLocator;
 import net.spy.memcached.internal.BulkFuture;
+import net.spy.memcached.internal.BulkGetCompletionListener;
+import net.spy.memcached.internal.OperationFuture;
 import net.spy.memcached.ops.OperationStatus;
 import net.spy.memcached.transcoders.SerializingTranscoder;
 import net.spy.memcached.transcoders.Transcoder;
+import org.easymock.EasyMock;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.net.SocketAddress;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -52,37 +81,147 @@ import java.util.concurrent.TimeoutException;
  */
 public class MemcachedCacheTest
 {
+  private static final Logger log = new Logger(MemcachedCacheTest.class);
   private static final byte[] HI = "hiiiiiiiiiiiiiiiiiii".getBytes();
   private static final byte[] HO = "hooooooooooooooooooo".getBytes();
+  protected static final AbstractMonitor NOOP_MONITOR = new AbstractMonitor()
+  {
+    @Override
+    public boolean doMonitor(ServiceEmitter emitter)
+    {
+      return false;
+    }
+  };
   private MemcachedCache cache;
+  private final MemcachedCacheConfig memcachedCacheConfig = new MemcachedCacheConfig()
+  {
+    @Override
+    public String getMemcachedPrefix()
+    {
+      return "druid-memcached-test";
+    }
+
+    @Override
+    public int getTimeout()
+    {
+      return 10;
+    }
+
+    @Override
+    public int getExpiration()
+    {
+      return 3600;
+    }
+
+    @Override
+    public String getHosts()
+    {
+      return "localhost:9999";
+    }
+  };
 
   @Before
   public void setUp() throws Exception
   {
-    MemcachedClientIF client = new MockMemcachedClient();
     cache = new MemcachedCache(
-        client, new MemcachedCacheConfig()
+        Suppliers.<ResourceHolder<MemcachedClientIF>>ofInstance(
+            StupidResourceHolder.<MemcachedClientIF>create(new MockMemcachedClient())
+        ),
+        memcachedCacheConfig,
+        NOOP_MONITOR
+    );
+  }
+
+  @Test
+  public void testBasicInjection() throws Exception
+  {
+    final MemcachedCacheConfig config = new MemcachedCacheConfig()
     {
       @Override
-      public String getMemcachedPrefix()
+      public String getHosts()
       {
-        return "druid-memcached-test";
+        return "127.0.0.1:22";
       }
+    };
+    Injector injector = Initialization.makeInjectorWithModules(
+        GuiceInjectors.makeStartupInjector(), ImmutableList.of(
+            new Module()
+            {
+              @Override
+              public void configure(Binder binder)
+              {
+                binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/test/memcached");
+                binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
 
-      @Override
-      public int getTimeout()
-      {
-        return 500;
-      }
-
-      @Override
-      public int getExpiration()
-      {
-        return 3600;
-      }
-
-    }
+                binder.bind(MemcachedCacheConfig.class).toInstance(config);
+                binder.bind(Cache.class).toProvider(MemcachedProviderWithConfig.class).in(ManageLifecycle.class);
+              }
+            }
+        )
     );
+    Lifecycle lifecycle = injector.getInstance(Lifecycle.class);
+    lifecycle.start();
+    try {
+      Cache cache = injector.getInstance(Cache.class);
+      Assert.assertEquals(MemcachedCache.class, cache.getClass());
+    }
+    finally {
+      lifecycle.stop();
+    }
+  }
+
+  @Test
+  public void testSimpleInjection()
+  {
+    final String uuid = UUID.randomUUID().toString();
+    System.setProperty(uuid + ".type", "memcached");
+    System.setProperty(uuid + ".hosts", "localhost");
+    final Injector injector = Initialization.makeInjectorWithModules(
+        GuiceInjectors.makeStartupInjector(), ImmutableList.<Module>of(
+            new Module()
+            {
+              @Override
+              public void configure(Binder binder)
+              {
+                binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/test/memcached");
+                binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
+
+                binder.bind(Cache.class).toProvider(CacheProvider.class);
+                JsonConfigProvider.bind(binder, uuid, CacheProvider.class);
+              }
+            }
+        )
+    );
+    final CacheProvider memcachedCacheProvider = injector.getInstance(CacheProvider.class);
+    Assert.assertNotNull(memcachedCacheProvider);
+    Assert.assertEquals(MemcachedCacheProvider.class, memcachedCacheProvider.getClass());
+  }
+
+  @Test
+  public void testMonitor() throws Exception
+  {
+    final MemcachedCache cache = MemcachedCache.create(memcachedCacheConfig);
+    final Emitter emitter = EasyMock.createNiceMock(Emitter.class);
+    final Collection<Event> events = new ArrayList<>();
+    final ServiceEmitter serviceEmitter = new ServiceEmitter("service", "host", emitter)
+    {
+      @Override
+      public void emit(Event event)
+      {
+        events.add(event);
+      }
+    };
+
+    while (events.isEmpty()) {
+      Thread.sleep(memcachedCacheConfig.getTimeout());
+      cache.doMonitor(serviceEmitter);
+    }
+
+    Assert.assertFalse(events.isEmpty());
+    ObjectMapper mapper = new DefaultObjectMapper();
+    for (Event event : events) {
+      log.debug("Found event `%s`", mapper.writeValueAsString(event.toMap()));
+    }
   }
 
   @Test
@@ -143,6 +282,23 @@ public class MemcachedCacheTest
   }
 }
 
+class MemcachedProviderWithConfig extends MemcachedCacheProvider
+{
+  private final MemcachedCacheConfig config;
+
+  @Inject
+  public MemcachedProviderWithConfig(MemcachedCacheConfig config)
+  {
+    this.config = config;
+  }
+
+  @Override
+  public Cache get()
+  {
+    return MemcachedCache.create(config);
+  }
+}
+
 class MockMemcachedClient implements MemcachedClientIF
 {
   private final ConcurrentMap<String, CachedData> theMap = new ConcurrentHashMap<String, CachedData>();
@@ -185,9 +341,23 @@ class MockMemcachedClient implements MemcachedClientIF
   }
 
   @Override
+  public Future<Boolean> append(String s, Object o)
+  {
+    return null;
+  }
+
+  @Override
   public <T> Future<Boolean> append(long cas, String key, T val, Transcoder<T> tc)
   {
     throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public <T> Future<Boolean> append(
+      String s, T t, Transcoder<T> tTranscoder
+  )
+  {
+    return null;
   }
 
   @Override
@@ -197,9 +367,23 @@ class MockMemcachedClient implements MemcachedClientIF
   }
 
   @Override
+  public Future<Boolean> prepend(String s, Object o)
+  {
+    return null;
+  }
+
+  @Override
   public <T> Future<Boolean> prepend(long cas, String key, T val, Transcoder<T> tc)
   {
     throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public <T> Future<Boolean> prepend(
+      String s, T t, Transcoder<T> tTranscoder
+  )
+  {
+    return null;
   }
 
   @Override
@@ -215,6 +399,22 @@ class MockMemcachedClient implements MemcachedClientIF
   }
 
   @Override
+  public Future<CASResponse> asyncCAS(
+      String s, long l, int i, Object o
+  )
+  {
+    return null;
+  }
+
+  @Override
+  public <T> OperationFuture<CASResponse> asyncCAS(
+      String s, long l, int i, T t, Transcoder<T> tTranscoder
+  )
+  {
+    return null;
+  }
+
+  @Override
   public <T> CASResponse cas(String key, long casId, int exp, T value, Transcoder<T> tc)
   {
     throw new UnsupportedOperationException("not implemented");
@@ -224,6 +424,20 @@ class MockMemcachedClient implements MemcachedClientIF
   public CASResponse cas(String key, long casId, Object value)
   {
     throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public CASResponse cas(String s, long l, int i, Object o)
+  {
+    return null;
+  }
+
+  @Override
+  public <T> CASResponse cas(
+      String s, long l, T t, Transcoder<T> tTranscoder
+  )
+  {
+    return null;
   }
 
   @Override
@@ -438,6 +652,18 @@ class MockMemcachedClient implements MemcachedClientIF
       }
 
       @Override
+      public Future<Map<String, T>> addListener(BulkGetCompletionListener bulkGetCompletionListener)
+      {
+        return null;
+      }
+
+      @Override
+      public Future<Map<String, T>> removeListener(BulkGetCompletionListener bulkGetCompletionListener)
+      {
+        return null;
+      }
+
+      @Override
       public boolean cancel(boolean b)
       {
         return false;
@@ -623,6 +849,30 @@ class MockMemcachedClient implements MemcachedClientIF
   }
 
   @Override
+  public Future<Long> asyncIncr(String s, long l, long l2, int i)
+  {
+    return null;
+  }
+
+  @Override
+  public Future<Long> asyncIncr(String s, int i, long l, int i2)
+  {
+    return null;
+  }
+
+  @Override
+  public Future<Long> asyncDecr(String s, long l, long l2, int i)
+  {
+    return null;
+  }
+
+  @Override
+  public Future<Long> asyncDecr(String s, int i, long l, int i2)
+  {
+    return null;
+  }
+
+  @Override
   public Future<Long> asyncIncr(String key, long by)
   {
     throw new UnsupportedOperationException("not implemented");
@@ -671,9 +921,39 @@ class MockMemcachedClient implements MemcachedClientIF
   }
 
   @Override
+  public Future<Long> asyncIncr(String s, long l, long l2)
+  {
+    return null;
+  }
+
+  @Override
+  public Future<Long> asyncIncr(String s, int i, long l)
+  {
+    return null;
+  }
+
+  @Override
+  public Future<Long> asyncDecr(String s, long l, long l2)
+  {
+    return null;
+  }
+
+  @Override
+  public Future<Long> asyncDecr(String s, int i, long l)
+  {
+    return null;
+  }
+
+  @Override
   public Future<Boolean> delete(String key)
   {
     throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public Future<Boolean> delete(String s, long l)
+  {
+    return null;
   }
 
   @Override
@@ -719,8 +999,22 @@ class MockMemcachedClient implements MemcachedClientIF
   }
 
   @Override
+  public CountDownLatch broadcastOp(BroadcastOpFactory broadcastOpFactory)
+  {
+    return null;
+  }
+
+  @Override
+  public CountDownLatch broadcastOp(
+      BroadcastOpFactory broadcastOpFactory, Collection<MemcachedNode> memcachedNodes
+  )
+  {
+    return null;
+  }
+
+  @Override
   public Set<String> listSaslMechanisms()
   {
     throw new UnsupportedOperationException("not implemented");
   }
-};
+}

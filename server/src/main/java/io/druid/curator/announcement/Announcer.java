@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.curator.announcement;
@@ -23,10 +23,9 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.MapMaker;
 import com.google.common.collect.Sets;
-import com.google.common.io.Closeables;
 import com.metamx.common.IAE;
 import com.metamx.common.ISE;
-import com.metamx.common.Pair;
+import com.metamx.common.guava.CloseQuietly;
 import com.metamx.common.lifecycle.LifecycleStart;
 import com.metamx.common.lifecycle.LifecycleStop;
 import com.metamx.common.logger.Logger;
@@ -34,6 +33,8 @@ import io.druid.curator.ShutdownNowIgnoringExecutorService;
 import io.druid.curator.cache.PathChildrenCacheFactory;
 import io.druid.curator.cache.SimplePathChildrenCacheFactory;
 import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.api.transaction.CuratorTransaction;
+import org.apache.curator.framework.api.transaction.CuratorTransactionFinal;
 import org.apache.curator.framework.recipes.cache.ChildData;
 import org.apache.curator.framework.recipes.cache.PathChildrenCache;
 import org.apache.curator.framework.recipes.cache.PathChildrenCacheEvent;
@@ -62,8 +63,8 @@ public class Announcer
   private final CuratorFramework curator;
   private final PathChildrenCacheFactory factory;
 
-  private final List<Pair<String, byte[]>> toAnnounce = Lists.newArrayList();
-  private final List<Pair<String, byte[]>> toUpdate = Lists.newArrayList();
+  private final List<Announceable> toAnnounce = Lists.newArrayList();
+  private final List<Announceable> toUpdate = Lists.newArrayList();
   private final ConcurrentMap<String, PathChildrenCache> listeners = new MapMaker().makeMap();
   private final ConcurrentMap<String, ConcurrentMap<String, byte[]>> announcements = new MapMaker().makeMap();
   private final List<String> parentsIBuilt = new CopyOnWriteArrayList<String>();
@@ -89,13 +90,13 @@ public class Announcer
 
       started = true;
 
-      for (Pair<String, byte[]> pair : toAnnounce) {
-        announce(pair.lhs, pair.rhs);
+      for (Announceable announceable : toAnnounce) {
+        announce(announceable.path, announceable.bytes, announceable.removeParentsIfCreated);
       }
       toAnnounce.clear();
 
-      for (Pair<String, byte[]> pair : toUpdate) {
-        update(pair.lhs, pair.rhs);
+      for (Announceable announceable : toUpdate) {
+        update(announceable.path, announceable.bytes);
       }
       toUpdate.clear();
     }
@@ -112,7 +113,7 @@ public class Announcer
       started = false;
 
       for (Map.Entry<String, PathChildrenCache> entry : listeners.entrySet()) {
-        Closeables.closeQuietly(entry.getValue());
+        CloseQuietly.close(entry.getValue());
       }
 
       for (Map.Entry<String, ConcurrentMap<String, byte[]>> entry : announcements.entrySet()) {
@@ -123,29 +124,47 @@ public class Announcer
         }
       }
 
-      for (String parent : parentsIBuilt) {
+      if (!parentsIBuilt.isEmpty()) {
+        CuratorTransaction transaction = curator.inTransaction();
+        for (String parent : parentsIBuilt) {
+          try {
+            transaction = transaction.delete().forPath(parent).and();
+          }
+          catch (Exception e) {
+            log.info(e, "Unable to delete parent[%s], boooo.", parent);
+          }
+        }
         try {
-          curator.delete().forPath(parent);
+          ((CuratorTransactionFinal) transaction).commit();
         }
         catch (Exception e) {
-          log.info(e, "Unable to delete parent[%s], boooo.", parent);
+          log.info(e, "Unable to commit transaction. Please feed the hamsters");
         }
       }
     }
   }
 
   /**
-   * Announces the provided bytes at the given path.  Announcement means that it will create an ephemeral node
-   * and monitor it to make sure that it always exists until it is unannounced or this object is closed.
-   *
-   * @param path  The path to announce at
-   * @param bytes The payload to announce
+   * Like announce(path, bytes, true).
    */
   public void announce(String path, byte[] bytes)
   {
+    announce(path, bytes, true);
+  }
+
+  /**
+   * Announces the provided bytes at the given path.  Announcement means that it will create an ephemeral node
+   * and monitor it to make sure that it always exists until it is unannounced or this object is closed.
+   *
+   * @param path                  The path to announce at
+   * @param bytes                 The payload to announce
+   * @param removeParentIfCreated remove parent of "path" if we had created that parent
+   */
+  public void announce(String path, byte[] bytes, boolean removeParentIfCreated)
+  {
     synchronized (toAnnounce) {
       if (!started) {
-        toAnnounce.add(Pair.of(path, bytes));
+        toAnnounce.add(new Announceable(path, bytes, removeParentIfCreated));
         return;
       }
     }
@@ -235,7 +254,7 @@ public class Announcer
           synchronized (toAnnounce) {
             if (started) {
               if (buildParentPath) {
-                createPath(parentPath);
+                createPath(parentPath, removeParentIfCreated);
               }
               startCache(cache);
               listeners.put(parentPath, cache);
@@ -274,7 +293,8 @@ public class Announcer
   {
     synchronized (toAnnounce) {
       if (!started) {
-        toUpdate.add(Pair.of(path, bytes));
+        // removeParentsIfCreated is not relevant for updates; use dummy value "false".
+        toUpdate.add(new Announceable(path, bytes, false));
         return;
       }
     }
@@ -321,7 +341,7 @@ public class Announcer
    * <p/>
    * If you need to completely clear all the state of what is being watched and announced, stop() the Announcer.
    *
-   * @param path
+   * @param path the path to unannounce
    */
   public void unannounce(String path)
   {
@@ -337,7 +357,7 @@ public class Announcer
     }
 
     try {
-      curator.delete().guaranteed().forPath(path);
+      curator.inTransaction().delete().forPath(path).and().commit();
     }
     catch (KeeperException.NoNodeException e) {
       log.info("node[%s] didn't exist anyway...", path);
@@ -353,19 +373,36 @@ public class Announcer
       cache.start();
     }
     catch (Exception e) {
-      Closeables.closeQuietly(cache);
+      CloseQuietly.close(cache);
       throw Throwables.propagate(e);
     }
   }
 
-  private void createPath(String parentPath)
+  private void createPath(String parentPath, boolean removeParentsIfCreated)
   {
     try {
       curator.create().creatingParentsIfNeeded().forPath(parentPath);
-      parentsIBuilt.add(parentPath);
+      if (removeParentsIfCreated) {
+        parentsIBuilt.add(parentPath);
+      }
+      log.debug("Created parentPath[%s], %s remove on stop.", parentPath, removeParentsIfCreated ? "will" : "will not");
     }
     catch (Exception e) {
       log.info(e, "Problem creating parentPath[%s], someone else created it first?", parentPath);
+    }
+  }
+
+  private static class Announceable
+  {
+    final String path;
+    final byte[] bytes;
+    final boolean removeParentsIfCreated;
+
+    public Announceable(String path, byte[] bytes, boolean removeParentsIfCreated)
+    {
+      this.path = path;
+      this.bytes = bytes;
+      this.removeParentsIfCreated = removeParentsIfCreated;
     }
   }
 }

@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2014  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.groupby;
@@ -24,21 +24,31 @@ import com.google.common.collect.Lists;
 import com.metamx.common.ISE;
 import com.metamx.common.Pair;
 import com.metamx.common.guava.Accumulator;
-import io.druid.data.input.Row;
-import io.druid.data.input.Rows;
+import io.druid.collections.StupidPool;
+import io.druid.data.input.MapBasedInputRow;
+import io.druid.data.input.MapBasedRow;
 import io.druid.granularity.QueryGranularity;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.dimension.DimensionSpec;
 import io.druid.segment.incremental.IncrementalIndex;
+import io.druid.segment.incremental.IndexSizeExceededException;
+import io.druid.segment.incremental.OffheapIncrementalIndex;
+import io.druid.segment.incremental.OnheapIncrementalIndex;
 
-import javax.annotation.Nullable;
+import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class GroupByQueryHelper
 {
-  public static Pair<IncrementalIndex, Accumulator<IncrementalIndex, Row>> createIndexAccumulatorPair(
+  private static final String CTX_KEY_MAX_RESULTS = "maxResults";
+  public final static String CTX_KEY_SORT_RESULTS = "sortResults";
+
+  public static <T> Pair<IncrementalIndex, Accumulator<IncrementalIndex, T>> createIndexAccumulatorPair(
       final GroupByQuery query,
-      final GroupByQueryConfig config
+      final GroupByQueryConfig config,
+      StupidPool<ByteBuffer> bufferPool
   )
   {
     final QueryGranularity gran = query.getGranularity();
@@ -53,7 +63,7 @@ public class GroupByQueryHelper
         new Function<AggregatorFactory, AggregatorFactory>()
         {
           @Override
-          public AggregatorFactory apply(@Nullable AggregatorFactory input)
+          public AggregatorFactory apply(AggregatorFactory input)
           {
             return input.getCombiningFactory();
           }
@@ -64,33 +74,89 @@ public class GroupByQueryHelper
         new Function<DimensionSpec, String>()
         {
           @Override
-          public String apply(@Nullable DimensionSpec input)
+          public String apply(DimensionSpec input)
           {
             return input.getOutputName();
           }
         }
     );
-    IncrementalIndex index = new IncrementalIndex(
-        // use granularity truncated min timestamp
-        // since incoming truncated timestamps may precede timeStart
-        granTimeStart,
-        gran,
-        aggs.toArray(new AggregatorFactory[aggs.size()])
-    );
+    final IncrementalIndex index;
 
-    Accumulator<IncrementalIndex, Row> accumulator = new Accumulator<IncrementalIndex, Row>()
+    final boolean sortResults = query.getContextValue(CTX_KEY_SORT_RESULTS, true);
+
+    if (query.getContextValue("useOffheap", false)) {
+      index = new OffheapIncrementalIndex(
+          // use granularity truncated min timestamp
+          // since incoming truncated timestamps may precede timeStart
+          granTimeStart,
+          gran,
+          aggs.toArray(new AggregatorFactory[aggs.size()]),
+          false,
+          true,
+          sortResults,
+          Math.min(query.getContextValue(CTX_KEY_MAX_RESULTS, config.getMaxResults()), config.getMaxResults()),
+          bufferPool
+      );
+    } else {
+      index = new OnheapIncrementalIndex(
+          // use granularity truncated min timestamp
+          // since incoming truncated timestamps may precede timeStart
+          granTimeStart,
+          gran,
+          aggs.toArray(new AggregatorFactory[aggs.size()]),
+          false,
+          true,
+          sortResults,
+          Math.min(query.getContextValue(CTX_KEY_MAX_RESULTS, config.getMaxResults()), config.getMaxResults())
+      );
+    }
+
+    Accumulator<IncrementalIndex, T> accumulator = new Accumulator<IncrementalIndex, T>()
     {
       @Override
-      public IncrementalIndex accumulate(IncrementalIndex accumulated, Row in)
+      public IncrementalIndex accumulate(IncrementalIndex accumulated, T in)
       {
-        if (accumulated.add(Rows.toCaseInsensitiveInputRow(in, dimensions)) > config.getMaxResults()) {
-          throw new ISE("Computation exceeds maxRows limit[%s]", config.getMaxResults());
+
+        if (in instanceof MapBasedRow) {
+          try {
+            MapBasedRow row = (MapBasedRow) in;
+            accumulated.add(
+                new MapBasedInputRow(
+                    row.getTimestamp(),
+                    dimensions,
+                    row.getEvent()
+                )
+            );
+          }
+          catch (IndexSizeExceededException e) {
+            throw new ISE(e.getMessage());
+          }
+        } else {
+          throw new ISE("Unable to accumulate something of type [%s]", in.getClass());
         }
 
         return accumulated;
       }
     };
-    return new Pair<IncrementalIndex, Accumulator<IncrementalIndex, Row>>(index, accumulator);
+    return new Pair<>(index, accumulator);
   }
 
+  public static <T> Pair<Queue, Accumulator<Queue, T>> createBySegmentAccumulatorPair()
+  {
+    // In parallel query runner multiple threads add to this queue concurrently
+    Queue init = new ConcurrentLinkedQueue<>();
+    Accumulator<Queue, T> accumulator = new Accumulator<Queue, T>()
+    {
+      @Override
+      public Queue accumulate(Queue accumulated, T in)
+      {
+        if (in == null) {
+          throw new ISE("Cannot have null result");
+        }
+        accumulated.offer(in);
+        return accumulated;
+      }
+    };
+    return new Pair<>(init, accumulator);
+  }
 }

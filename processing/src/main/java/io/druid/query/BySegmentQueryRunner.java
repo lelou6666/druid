@@ -1,34 +1,32 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query;
 
 import com.google.common.collect.Lists;
-import com.metamx.common.guava.Accumulator;
 import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.Sequences;
-import com.metamx.common.guava.Yielder;
-import com.metamx.common.guava.Yielders;
-import com.metamx.common.guava.YieldingAccumulator;
 import org.joda.time.DateTime;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /**
  */
@@ -51,19 +49,13 @@ public class BySegmentQueryRunner<T> implements QueryRunner<T>
 
   @Override
   @SuppressWarnings("unchecked")
-  public Sequence<T> run(final Query<T> query)
+  public Sequence<T> run(final Query<T> query, Map<String, Object> responseContext)
   {
-    if (query.getContextBySegment(false)) {
-      final Sequence<T> baseSequence = base.run(query);
-      return new Sequence<T>()
-      {
-        @Override
-        public <OutType> OutType accumulate(OutType initValue, Accumulator<OutType, T> accumulator)
-        {
-          List<T> results = Sequences.toList(baseSequence, Lists.<T>newArrayList());
-
-          return accumulator.accumulate(
-              initValue,
+    if (BaseQuery.getContextBySegment(query, false)) {
+      final Sequence<T> baseSequence = base.run(query, responseContext);
+      final List<T> results = Sequences.toList(baseSequence, Lists.<T>newArrayList());
+      return Sequences.simple(
+          Arrays.asList(
               (T) new Result<BySegmentResultValueClass<T>>(
                   timestamp,
                   new BySegmentResultValueClass<T>(
@@ -72,31 +64,9 @@ public class BySegmentQueryRunner<T> implements QueryRunner<T>
                       query.getIntervals().get(0)
                   )
               )
-          );
-        }
-
-        @Override
-        public <OutType> Yielder<OutType> toYielder(OutType initValue, YieldingAccumulator<OutType, T> accumulator)
-        {
-          List<T> results = Sequences.toList(baseSequence, Lists.<T>newArrayList());
-
-          final OutType retVal = accumulator.accumulate(
-              initValue,
-              (T) new Result<BySegmentResultValueClass<T>>(
-                  timestamp,
-                  new BySegmentResultValueClass<T>(
-                      results,
-                      segmentIdentifier,
-                      query.getIntervals().get(0)
-                  )
-              )
-          );
-
-          return Yielders.done(retVal, null);
-        }
-      };
+          )
+      );
     }
-
-    return base.run(query);
+    return base.run(query, responseContext);
   }
 }

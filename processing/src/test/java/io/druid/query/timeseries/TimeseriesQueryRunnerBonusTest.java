@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.timeseries;
@@ -30,26 +30,47 @@ import io.druid.query.FinalizeResultsQueryRunner;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
+import io.druid.query.QueryRunnerTestHelper;
 import io.druid.query.Result;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
 import io.druid.segment.IncrementalIndexSegment;
 import io.druid.segment.Segment;
 import io.druid.segment.incremental.IncrementalIndex;
-import junit.framework.Assert;
+import io.druid.segment.incremental.OnheapIncrementalIndex;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
+import org.junit.Assert;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 
+@RunWith(Parameterized.class)
 public class TimeseriesQueryRunnerBonusTest
 {
+  @Parameterized.Parameters(name = "descending={0}")
+  public static Iterable<Object[]> constructorFeeder() throws IOException
+  {
+    return QueryRunnerTestHelper.transformToConstructionFeeder(Arrays.asList(false, true));
+  }
+
+  private final boolean descending;
+
+  public TimeseriesQueryRunnerBonusTest(boolean descending)
+  {
+    this.descending = descending;
+  }
+
   @Test
   public void testOneRowAtATime() throws Exception
   {
-    final IncrementalIndex oneRowIndex = new IncrementalIndex(
-        new DateTime("2012-01-01T00:00:00Z").getMillis(), QueryGranularity.NONE, new AggregatorFactory[]{}
+    final IncrementalIndex oneRowIndex = new OnheapIncrementalIndex(
+        new DateTime("2012-01-01T00:00:00Z").getMillis(), QueryGranularity.NONE, new AggregatorFactory[]{}, 1000
     );
 
     List<Result<TimeseriesResultValue>> results;
@@ -85,9 +106,15 @@ public class TimeseriesQueryRunnerBonusTest
     Assert.assertEquals("result count metric", 2, (long) results.get(0).getValue().getLongMetric("rows"));
   }
 
-  private static List<Result<TimeseriesResultValue>> runTimeseriesCount(IncrementalIndex index)
+  private List<Result<TimeseriesResultValue>> runTimeseriesCount(IncrementalIndex index)
   {
-    final QueryRunnerFactory factory = TimeseriesQueryRunnerFactory.create();
+    final QueryRunnerFactory factory = new TimeseriesQueryRunnerFactory(
+        new TimeseriesQueryQueryToolChest(
+            QueryRunnerTestHelper.NoopIntervalChunkingQueryRunnerDecorator()),
+        new TimeseriesQueryEngine(),
+        QueryRunnerTestHelper.NOOP_QUERYWATCHER
+    );
+
     final QueryRunner<Result<TimeseriesResultValue>> runner = makeQueryRunner(
         factory,
         new IncrementalIndexSegment(index, null)
@@ -102,10 +129,11 @@ public class TimeseriesQueryRunnerBonusTest
                                           new CountAggregatorFactory("rows")
                                       )
                                   )
+                                  .descending(descending)
                                   .build();
-
+    HashMap<String,Object> context = new HashMap<String, Object>();
     return Sequences.toList(
-        runner.run(query),
+        runner.run(query, context),
         Lists.<Result<TimeseriesResultValue>>newArrayList()
     );
   }

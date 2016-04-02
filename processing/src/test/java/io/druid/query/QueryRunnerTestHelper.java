@@ -1,32 +1,40 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query;
 
 import com.google.common.base.Function;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.metamx.common.UOE;
+import com.metamx.common.guava.MergeSequence;
+import com.metamx.common.guava.Sequence;
+import com.metamx.common.guava.Sequences;
 import io.druid.granularity.QueryGranularity;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
 import io.druid.query.aggregation.DoubleSumAggregatorFactory;
 import io.druid.query.aggregation.JavaScriptAggregatorFactory;
 import io.druid.query.aggregation.LongSumAggregatorFactory;
+import io.druid.query.aggregation.cardinality.CardinalityAggregatorFactory;
 import io.druid.query.aggregation.hyperloglog.HyperUniqueFinalizingPostAggregator;
 import io.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
 import io.druid.query.aggregation.post.ArithmeticPostAggregator;
@@ -34,72 +42,119 @@ import io.druid.query.aggregation.post.ConstantPostAggregator;
 import io.druid.query.aggregation.post.FieldAccessPostAggregator;
 import io.druid.query.spec.MultipleIntervalSegmentSpec;
 import io.druid.query.spec.QuerySegmentSpec;
+import io.druid.query.spec.SpecificSegmentSpec;
 import io.druid.segment.IncrementalIndexSegment;
 import io.druid.segment.QueryableIndex;
 import io.druid.segment.QueryableIndexSegment;
 import io.druid.segment.Segment;
 import io.druid.segment.TestIndex;
 import io.druid.segment.incremental.IncrementalIndex;
+import io.druid.timeline.TimelineObjectHolder;
+import io.druid.timeline.VersionedIntervalTimeline;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 /**
  */
 public class QueryRunnerTestHelper
 {
+
+  public static final QueryWatcher NOOP_QUERYWATCHER = new QueryWatcher()
+  {
+    @Override
+    public void registerQuery(Query query, ListenableFuture future)
+    {
+
+    }
+  };
+
   public static final String segmentId = "testSegment";
   public static final String dataSource = "testing";
   public static final UnionDataSource unionDataSource = new UnionDataSource(
       Lists.transform(
           Lists.newArrayList(dataSource, dataSource, dataSource, dataSource), new Function<String, TableDataSource>()
-      {
-        @Nullable
-        @Override
-        public TableDataSource apply(@Nullable String input)
-        {
-          return new TableDataSource(input);
-        }
-      }
+          {
+            @Nullable
+            @Override
+            public TableDataSource apply(@Nullable String input)
+            {
+              return new TableDataSource(input);
+            }
+          }
       )
   );
+
+  public static final DateTime minTime = new DateTime("2011-01-12T00:00:00.000Z");
+
   public static final QueryGranularity dayGran = QueryGranularity.DAY;
   public static final QueryGranularity allGran = QueryGranularity.ALL;
-  public static final String providerDimension = "proVider";
+  public static final String marketDimension = "market";
   public static final String qualityDimension = "quality";
   public static final String placementDimension = "placement";
   public static final String placementishDimension = "placementish";
+  public static final String partialNullDimension = "partial_null_column";
+
+  public static final List<String> dimensions = Lists.newArrayList(
+      marketDimension,
+      qualityDimension,
+      placementDimension,
+      placementishDimension
+  );
   public static final String indexMetric = "index";
   public static final String uniqueMetric = "uniques";
   public static final String addRowsIndexConstantMetric = "addRowsIndexConstant";
+  public static final List<String> metrics = Lists.newArrayList(indexMetric, uniqueMetric, addRowsIndexConstantMetric);
+
   public static String dependentPostAggMetric = "dependentPostAgg";
   public static final CountAggregatorFactory rowsCount = new CountAggregatorFactory("rows");
   public static final LongSumAggregatorFactory indexLongSum = new LongSumAggregatorFactory("index", "index");
+  public static final LongSumAggregatorFactory __timeLongSum = new LongSumAggregatorFactory("sumtime", "__time");
   public static final DoubleSumAggregatorFactory indexDoubleSum = new DoubleSumAggregatorFactory("index", "index");
+  public static final String JS_COMBINE_A_PLUS_B = "function combine(a, b) { return a + b; }";
+  public static final String JS_RESET_0 = "function reset() { return 0; }";
   public static final JavaScriptAggregatorFactory jsIndexSumIfPlacementishA = new JavaScriptAggregatorFactory(
       "nindex",
       Arrays.asList("placementish", "index"),
       "function aggregate(current, a, b) { if ((Array.isArray(a) && a.indexOf('a') > -1) || a === 'a') { return current + b; } else { return current; } }",
-      "function reset() { return 0; }",
-      "function combine(a, b) { return a + b; }"
+      JS_RESET_0,
+      JS_COMBINE_A_PLUS_B
+  );
+  public static final JavaScriptAggregatorFactory jsCountIfTimeGreaterThan = new JavaScriptAggregatorFactory(
+      "ntimestamps",
+      Arrays.asList("__time"),
+      "function aggregate(current, t) { if (t > " +
+      new DateTime("2011-04-01T12:00:00Z").getMillis() +
+      ") { return current + 1; } else { return current; } }",
+      JS_RESET_0,
+      JS_COMBINE_A_PLUS_B
   );
   public static final JavaScriptAggregatorFactory jsPlacementishCount = new JavaScriptAggregatorFactory(
       "pishcount",
       Arrays.asList("placementish", "index"),
       "function aggregate(current, a) { if (Array.isArray(a)) { return current + a.length; } else if (typeof a === 'string') { return current + 1; } else { return current; } }",
-      "function reset() { return 0; }",
-      "function combine(a, b) { return a + b; }"
+      JS_RESET_0,
+      JS_COMBINE_A_PLUS_B
   );
   public static final HyperUniquesAggregatorFactory qualityUniques = new HyperUniquesAggregatorFactory(
       "uniques",
       "quality_uniques"
   );
-  public static final ConstantPostAggregator constant = new ConstantPostAggregator("const", 1L, null);
+  public static final CardinalityAggregatorFactory qualityCardinality = new CardinalityAggregatorFactory(
+      "cardinality",
+      Arrays.asList("quality"),
+      false
+  );
+  public static final ConstantPostAggregator constant = new ConstantPostAggregator("const", 1L);
   public static final FieldAccessPostAggregator rowsPostAgg = new FieldAccessPostAggregator("rows", "rows");
   public static final FieldAccessPostAggregator indexPostAgg = new FieldAccessPostAggregator("index", "index");
   public static final ArithmeticPostAggregator addRowsIndexConstant =
@@ -121,7 +176,7 @@ public class QueryRunnerTestHelper
   public static ArithmeticPostAggregator hyperUniqueFinalizingPostAgg = new ArithmeticPostAggregator(
       hyperUniqueFinalizingPostAggMetric,
       "+",
-      Lists.newArrayList(new HyperUniqueFinalizingPostAggregator(uniqueMetric), new ConstantPostAggregator(null, 1, 1))
+      Lists.newArrayList(new HyperUniqueFinalizingPostAggregator(uniqueMetric, uniqueMetric), new ConstantPostAggregator(null, 1))
   );
 
   public static final List<AggregatorFactory> commonAggregators = Arrays.asList(
@@ -156,6 +211,17 @@ public class QueryRunnerTestHelper
       "5506.567192077637", "4743.144546508789", "4913.282669067383", "4723.869743347168"
   };
 
+  public static final String[] expectedFullOnIndexValuesDesc;
+
+  static {
+    List<String> list = new ArrayList(Arrays.asList(expectedFullOnIndexValues));
+    Collections.reverse(list);
+    expectedFullOnIndexValuesDesc = list.toArray(new String[list.size()]);
+  }
+
+  public static final DateTime earliest = new DateTime("2011-01-12");
+  public static final DateTime last = new DateTime("2011-04-15");
+
   public static final DateTime skippedDay = new DateTime("2011-01-21T00:00:00.000Z");
 
   public static final QuerySegmentSpec firstToThird = new MultipleIntervalSegmentSpec(
@@ -171,56 +237,194 @@ public class QueryRunnerTestHelper
       Arrays.asList(new Interval("2020-04-02T00:00:00.000Z/P1D"))
   );
 
-  @SuppressWarnings("unchecked")
-  public static Collection<?> makeQueryRunners(
-      QueryRunnerFactory factory
+  public static Iterable<Object[]> transformToConstructionFeeder(Iterable<?> in)
+  {
+    return Iterables.transform(
+        in, new Function<Object, Object[]>()
+        {
+          @Nullable
+          @Override
+          public Object[] apply(@Nullable Object input)
+          {
+            return new Object[]{input};
+          }
+        }
+    );
+  }
+
+  // simple cartesian iterable
+  public static Iterable<Object[]> cartesian(final Iterable... iterables)
+  {
+    return new Iterable<Object[]>()
+    {
+
+      @Override
+      public Iterator<Object[]> iterator()
+      {
+        return new Iterator<Object[]>()
+        {
+          private final Iterator[] iterators = new Iterator[iterables.length];
+          private final Object[] cached = new Object[iterables.length];
+
+          @Override
+          public boolean hasNext()
+          {
+            return hasNext(0);
+          }
+
+          private boolean hasNext(int index)
+          {
+            if (iterators[index] == null) {
+              iterators[index] = iterables[index].iterator();
+            }
+            for (; hasMore(index); cached[index] = null) {
+              if (index == iterables.length - 1 || hasNext(index + 1)) {
+                return true;
+              }
+            }
+            iterators[index] = null;
+            return false;
+          }
+
+          private boolean hasMore(int index)
+          {
+            if (cached[index] == null && iterators[index].hasNext()) {
+              cached[index] = iterators[index].next();
+            }
+            return cached[index] != null;
+          }
+
+          @Override
+          public Object[] next()
+          {
+            Object[] result = Arrays.copyOf(cached, cached.length);
+            cached[cached.length - 1] = null;
+            return result;
+          }
+
+          @Override
+          public void remove()
+          {
+            throw new UnsupportedOperationException("remove");
+          }
+        };
+      }
+    };
+  }
+
+  public static <T, QueryType extends Query<T>> List<QueryRunner<T>> makeQueryRunners(
+      QueryRunnerFactory<T, QueryType> factory
   )
       throws IOException
   {
     final IncrementalIndex rtIndex = TestIndex.getIncrementalTestIndex();
     final QueryableIndex mMappedTestIndex = TestIndex.getMMappedTestIndex();
     final QueryableIndex mergedRealtimeIndex = TestIndex.mergedRealtimeIndex();
-    return Arrays.asList(
-        new Object[][]{
-            {
-                makeQueryRunner(factory, new IncrementalIndexSegment(rtIndex, segmentId))
-            },
-            {
-                makeQueryRunner(factory, new QueryableIndexSegment(segmentId, mMappedTestIndex))
-            },
-            {
-                makeQueryRunner(factory, new QueryableIndexSegment(segmentId, mergedRealtimeIndex))
-            }
-        }
+    return ImmutableList.of(
+        makeQueryRunner(factory, new IncrementalIndexSegment(rtIndex, segmentId)),
+        makeQueryRunner(factory, new QueryableIndexSegment(segmentId, mMappedTestIndex)),
+        makeQueryRunner(factory, new QueryableIndexSegment(segmentId, mergedRealtimeIndex))
     );
   }
 
   @SuppressWarnings("unchecked")
   public static Collection<?> makeUnionQueryRunners(
-      QueryRunnerFactory factory
+      QueryRunnerFactory factory,
+      DataSource unionDataSource
   )
       throws IOException
   {
     final IncrementalIndex rtIndex = TestIndex.getIncrementalTestIndex();
     final QueryableIndex mMappedTestIndex = TestIndex.getMMappedTestIndex();
     final QueryableIndex mergedRealtimeIndex = TestIndex.mergedRealtimeIndex();
+
     return Arrays.asList(
-        new Object[][]{
-            {
-                makeUnionQueryRunner(factory, new IncrementalIndexSegment(rtIndex, segmentId))
-            },
-            {
-                makeUnionQueryRunner(factory, new QueryableIndexSegment(segmentId, mMappedTestIndex))
-            },
-            {
-                makeUnionQueryRunner(factory, new QueryableIndexSegment(segmentId, mergedRealtimeIndex))
+        makeUnionQueryRunner(factory, new IncrementalIndexSegment(rtIndex, segmentId)),
+        makeUnionQueryRunner(factory, new QueryableIndexSegment(segmentId, mMappedTestIndex)),
+        makeUnionQueryRunner(
+            factory,
+            new QueryableIndexSegment(segmentId, mergedRealtimeIndex)
+        )
+    );
+  }
+  /**
+   * Iterate through the iterables in a synchronous manner and return each step as an Object[]
+   * @param in The iterables to step through. (effectively columns)
+   * @return An iterable of Object[] containing the "rows" of the input (effectively rows)
+   */
+  public static Iterable<Object[]> transformToConstructionFeeder(Iterable<?>... in)
+  {
+    if (in == null) {
+      return ImmutableList.<Object[]>of();
+    }
+    final List<Iterable<?>> iterables = Arrays.asList(in);
+    final int length = in.length;
+    final List<Iterator<?>> iterators = new ArrayList<>(in.length);
+    for (Iterable<?> iterable : iterables) {
+      iterators.add(iterable.iterator());
+    }
+    return new Iterable<Object[]>()
+    {
+      @Override
+      public Iterator<Object[]> iterator()
+      {
+        return new Iterator<Object[]>()
+        {
+          @Override
+          public boolean hasNext()
+          {
+            int hasMore = 0;
+            for (Iterator<?> it : iterators) {
+              if (it.hasNext()) {
+                ++hasMore;
+              }
             }
-        }
+            return hasMore == length;
+          }
+
+          @Override
+          public Object[] next()
+          {
+            final ArrayList<Object> list = new ArrayList<Object>(length);
+            for (Iterator<?> it : iterators) {
+              list.add(it.next());
+            }
+            return list.toArray();
+          }
+
+          @Override
+          public void remove()
+          {
+            throw new UOE("Remove not supported");
+          }
+        };
+      }
+    };
+  }
+
+  public static <T, QueryType extends Query<T>> QueryRunner<T> makeQueryRunner(
+      QueryRunnerFactory<T, QueryType> factory,
+      String resourceFileName
+  )
+  {
+    return makeQueryRunner(
+        factory,
+        segmentId,
+        new IncrementalIndexSegment(TestIndex.makeRealtimeIndex(resourceFileName), segmentId)
     );
   }
 
-  public static <T> QueryRunner<T> makeQueryRunner(
-      QueryRunnerFactory<T, Query<T>> factory,
+  public static <T, QueryType extends Query<T>> QueryRunner<T> makeQueryRunner(
+      QueryRunnerFactory<T, QueryType> factory,
+      Segment adapter
+  )
+  {
+    return makeQueryRunner(factory, segmentId, adapter);
+  }
+
+  public static <T, QueryType extends Query<T>> QueryRunner<T> makeQueryRunner(
+      QueryRunnerFactory<T, QueryType> factory,
+      String segmentId,
       Segment adapter
   )
   {
@@ -229,7 +433,7 @@ public class QueryRunnerTestHelper
             segmentId, adapter.getDataInterval().getStart(),
             factory.createRunner(adapter)
         ),
-        factory.getToolchest()
+        (QueryToolChest<T, Query<T>>)factory.getToolchest()
     );
   }
 
@@ -245,12 +449,70 @@ public class QueryRunnerTestHelper
                     new BySegmentQueryRunner<T>(
                         segmentId, adapter.getDataInterval().getStart(),
                         factory.createRunner(adapter)
-                    ),
-                    factory.getToolchest()
+                    )
                 )
             )
         ),
         factory.getToolchest()
     );
+  }
+
+  public static <T> QueryRunner<T> makeFilteringQueryRunner(
+      final VersionedIntervalTimeline<String, Segment> timeline,
+      final QueryRunnerFactory<T, Query<T>> factory) {
+
+    final QueryToolChest<T, Query<T>> toolChest = factory.getToolchest();
+    return new FinalizeResultsQueryRunner(
+        toolChest.postMergeQueryDecoration(
+            toolChest.mergeResults(
+                toolChest.preMergeQueryDecoration(
+                    new QueryRunner<T>()
+                    {
+                      @Override
+                      public Sequence<T> run(Query<T> query, Map<String, Object> responseContext)
+                      {
+                        List<TimelineObjectHolder> segments = Lists.newArrayList();
+                        for (Interval interval : query.getIntervals()) {
+                          segments.addAll(timeline.lookup(interval));
+                        }
+                        List<Sequence<T>> sequences = Lists.newArrayList();
+                        for (TimelineObjectHolder<String, Segment> holder : toolChest.filterSegments(query, segments)) {
+                          Segment segment = holder.getObject().getChunk(0).getObject();
+                          Query running = query.withQuerySegmentSpec(
+                              new SpecificSegmentSpec(
+                                  new SegmentDescriptor(
+                                      holder.getInterval(),
+                                      holder.getVersion(),
+                                      0
+                                  )
+                              )
+                          );
+                          sequences.add(factory.createRunner(segment).run(running, responseContext));
+                        }
+                        return new MergeSequence<>(query.getResultOrdering(), Sequences.simple(sequences));
+                      }
+                    }
+                )
+            )
+        ),
+        toolChest
+    );
+  }
+
+  public static IntervalChunkingQueryRunnerDecorator NoopIntervalChunkingQueryRunnerDecorator()
+  {
+    return new IntervalChunkingQueryRunnerDecorator(null, null, null) {
+      @Override
+      public <T> QueryRunner<T> decorate(final QueryRunner<T> delegate,
+          QueryToolChest<T, ? extends Query<T>> toolChest) {
+        return new QueryRunner<T>() {
+          @Override
+          public Sequence<T> run(Query<T> query, Map<String, Object> responseContext)
+          {
+            return delegate.run(query, responseContext);
+          }
+        };
+      }
+    };
   }
 }

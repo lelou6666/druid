@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.overlord;
@@ -22,11 +22,11 @@ package io.druid.indexing.overlord;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import io.druid.indexing.common.task.Task;
 import io.druid.indexing.worker.TaskAnnouncement;
 import io.druid.indexing.worker.Worker;
 import org.apache.curator.framework.recipes.cache.ChildData;
@@ -46,15 +46,15 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class ZkWorker implements Closeable
 {
-  private final Worker worker;
   private final PathChildrenCache statusCache;
   private final Function<ChildData, TaskAnnouncement> cacheConverter;
 
+  private AtomicReference<Worker> worker;
   private AtomicReference<DateTime> lastCompletedTaskTime = new AtomicReference<DateTime>(new DateTime());
 
   public ZkWorker(Worker worker, PathChildrenCache statusCache, final ObjectMapper jsonMapper)
   {
-    this.worker = worker;
+    this.worker = new AtomicReference<>(worker);
     this.statusCache = statusCache;
     this.cacheConverter = new Function<ChildData, TaskAnnouncement>()
     {
@@ -84,7 +84,7 @@ public class ZkWorker implements Closeable
   @JsonProperty("worker")
   public Worker getWorker()
   {
-    return worker;
+    return worker.get();
   }
 
   @JsonProperty("runningTasks")
@@ -137,25 +137,29 @@ public class ZkWorker implements Closeable
     return getRunningTasks().containsKey(taskId);
   }
 
-  public boolean isAtCapacity()
-  {
-    return getCurrCapacityUsed() >= worker.getCapacity();
-  }
-
   public boolean isValidVersion(String minVersion)
   {
-    return worker.getVersion().compareTo(minVersion) >= 0;
+    return worker.get().getVersion().compareTo(minVersion) >= 0;
   }
 
-  public boolean canRunTask(Task task)
+  public void setWorker(Worker newWorker)
   {
-    return (worker.getCapacity() - getCurrCapacityUsed() >= task.getTaskResource().getRequiredCapacity()
-            && !getAvailabilityGroups().contains(task.getTaskResource().getAvailabilityGroup()));
+    final Worker oldWorker = worker.get();
+    Preconditions.checkArgument(newWorker.getHost().equals(oldWorker.getHost()), "Cannot change Worker host");
+    Preconditions.checkArgument(newWorker.getIp().equals(oldWorker.getIp()), "Cannot change Worker ip");
+
+    worker.set(newWorker);
   }
 
   public void setLastCompletedTaskTime(DateTime completedTaskTime)
   {
-    lastCompletedTaskTime.getAndSet(completedTaskTime);
+    lastCompletedTaskTime.set(completedTaskTime);
+  }
+
+  public ImmutableWorkerInfo toImmutable()
+  {
+
+    return new ImmutableWorkerInfo(worker.get(), getCurrCapacityUsed(), getAvailabilityGroups(), getRunningTaskIds(), lastCompletedTaskTime.get());
   }
 
   @Override

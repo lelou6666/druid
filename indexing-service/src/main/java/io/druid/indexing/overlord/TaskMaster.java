@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.indexing.overlord;
@@ -22,8 +22,6 @@ package io.druid.indexing.overlord;
 import com.google.common.base.Optional;
 import com.google.common.base.Throwables;
 import com.google.inject.Inject;
-import com.metamx.common.concurrent.ScheduledExecutorFactory;
-import com.metamx.common.concurrent.ScheduledExecutors;
 import com.metamx.common.lifecycle.Lifecycle;
 import com.metamx.common.lifecycle.LifecycleStart;
 import com.metamx.common.lifecycle.LifecycleStop;
@@ -34,14 +32,14 @@ import io.druid.guice.annotations.Self;
 import io.druid.indexing.common.actions.TaskActionClient;
 import io.druid.indexing.common.actions.TaskActionClientFactory;
 import io.druid.indexing.common.task.Task;
+import io.druid.indexing.overlord.autoscaling.ScalingStats;
 import io.druid.indexing.overlord.config.TaskQueueConfig;
-import io.druid.indexing.overlord.scaling.ResourceManagementScheduler;
-import io.druid.indexing.overlord.scaling.ResourceManagementSchedulerFactory;
 import io.druid.server.DruidNode;
-import io.druid.server.initialization.ZkPathsConfig;
+import io.druid.server.initialization.IndexerZkConfig;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
 import org.apache.curator.framework.recipes.leader.LeaderSelectorListener;
+import org.apache.curator.framework.recipes.leader.Participant;
 import org.apache.curator.framework.state.ConnectionState;
 
 import java.util.concurrent.atomic.AtomicReference;
@@ -63,7 +61,6 @@ public class TaskMaster
   private volatile boolean leading = false;
   private volatile TaskRunner taskRunner;
   private volatile TaskQueue taskQueue;
-  private volatile ResourceManagementScheduler resourceManagementScheduler;
 
   private static final EmittingLogger log = new EmittingLogger(TaskMaster.class);
 
@@ -74,9 +71,8 @@ public class TaskMaster
       final TaskStorage taskStorage,
       final TaskActionClientFactory taskActionClientFactory,
       @Self final DruidNode node,
-      final ZkPathsConfig zkPaths,
+      final IndexerZkConfig zkPaths,
       final TaskRunnerFactory runnerFactory,
-      final ResourceManagementSchedulerFactory managementSchedulerFactory,
       final CuratorFramework curator,
       final ServiceAnnouncer serviceAnnouncer,
       final ServiceEmitter emitter
@@ -85,7 +81,7 @@ public class TaskMaster
     this.taskActionClientFactory = taskActionClientFactory;
     this.leaderSelector = new LeaderSelector(
         curator,
-        zkPaths.getIndexerLeaderLatchPath(),
+        zkPaths.getLeaderLatchPath(),
         new LeaderSelectorListener()
         {
           @Override
@@ -117,14 +113,6 @@ public class TaskMaster
                    .emit();
               }
               leaderLifecycle.addManagedInstance(taskRunner);
-              if (taskRunner instanceof RemoteTaskRunner) {
-                final ScheduledExecutorFactory executorFactory = ScheduledExecutors.createFactory(leaderLifecycle);
-                resourceManagementScheduler = managementSchedulerFactory.build(
-                    (RemoteTaskRunner) taskRunner,
-                    executorFactory
-                );
-                leaderLifecycle.addManagedInstance(resourceManagementScheduler);
-              }
               leaderLifecycle.addManagedInstance(taskQueue);
               leaderLifecycle.addHandler(
                   new Lifecycle.Handler()
@@ -177,7 +165,7 @@ public class TaskMaster
         }
     );
 
-    leaderSelector.setId(node.getHost());
+    leaderSelector.setId(node.getHostAndPort());
     leaderSelector.autoRequeue();
   }
 
@@ -245,7 +233,12 @@ public class TaskMaster
   public String getLeader()
   {
     try {
-      return leaderSelector.getLeader().getId();
+      final Participant leader = leaderSelector.getLeader();
+      if (leader != null && leader.isLeader()) {
+        return leader.getId();
+      } else {
+        return null;
+      }
     }
     catch (Exception e) {
       throw Throwables.propagate(e);
@@ -279,10 +272,10 @@ public class TaskMaster
     }
   }
 
-  public Optional<ResourceManagementScheduler> getResourceManagementScheduler()
+  public Optional<ScalingStats> getScalingStats()
   {
     if (leading) {
-      return Optional.fromNullable(resourceManagementScheduler);
+      return taskRunner.getScalingStats();
     } else {
       return Optional.absent();
     }

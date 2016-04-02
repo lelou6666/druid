@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.timeline;
@@ -26,6 +26,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
 import com.metamx.common.Pair;
+import io.druid.common.utils.JodaUtils;
 import io.druid.timeline.partition.ImmutablePartitionHolder;
 import io.druid.timeline.partition.IntegerPartitionChunk;
 import io.druid.timeline.partition.PartitionChunk;
@@ -1294,7 +1295,7 @@ public class VersionedIntervalTimelineTest
             createExpected("2011-01-05/2011-01-10", "2", 2),
             createExpected("2011-01-10/2011-01-15", "3", 3)
         ),
-        timeline.lookup(new Interval(new DateTime(0), new DateTime(Long.MAX_VALUE)))
+        timeline.lookup(new Interval(new DateTime(0), new DateTime(JodaUtils.MAX_INSTANT)))
     );
   }
 
@@ -1494,6 +1495,16 @@ public class VersionedIntervalTimelineTest
     );
   }
 
+  @Test
+  public void testNotFoundReturnsEmpty() throws Exception
+  {
+    timeline = makeStringIntegerTimeline();
+
+    add("2011-04-01/2011-04-09", "1", 1);
+
+    Assert.assertTrue(timeline.lookup(Interval.parse("1970/1980")).isEmpty());
+  }
+  
   private Pair<Interval, Pair<String, PartitionHolder<Integer>>> createExpected(
       String intervalString,
       String version,
@@ -1595,4 +1606,5 @@ public class VersionedIntervalTimelineTest
   {
     return new VersionedIntervalTimeline<String, Integer>(Ordering.<String>natural());
   }
+
 }

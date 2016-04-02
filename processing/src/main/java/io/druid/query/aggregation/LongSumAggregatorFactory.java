@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.aggregation;
@@ -23,6 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.primitives.Longs;
+import com.metamx.common.StringUtils;
 import io.druid.segment.ColumnSelectorFactory;
 
 import java.nio.ByteBuffer;
@@ -31,11 +32,11 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
-*/
-public class LongSumAggregatorFactory implements AggregatorFactory
+ */
+public class LongSumAggregatorFactory extends AggregatorFactory
 {
   private static final byte CACHE_TYPE_ID = 0x1;
-  
+
   private final String fieldName;
   private final String name;
 
@@ -57,14 +58,14 @@ public class LongSumAggregatorFactory implements AggregatorFactory
   {
     return new LongSumAggregator(
         name,
-        metricFactory.makeFloatColumnSelector(fieldName)
+        metricFactory.makeLongColumnSelector(fieldName)
     );
   }
 
   @Override
   public BufferAggregator factorizeBuffered(ColumnSelectorFactory metricFactory)
   {
-    return new LongSumBufferAggregator(metricFactory.makeFloatColumnSelector(fieldName));
+    return new LongSumBufferAggregator(metricFactory.makeLongColumnSelector(fieldName));
   }
 
   @Override
@@ -83,6 +84,22 @@ public class LongSumAggregatorFactory implements AggregatorFactory
   public AggregatorFactory getCombiningFactory()
   {
     return new LongSumAggregatorFactory(name, name);
+  }
+
+  @Override
+  public AggregatorFactory getMergingFactory(AggregatorFactory other) throws AggregatorFactoryNotMergeableException
+  {
+    if (other.getName().equals(this.getName()) && this.getClass() == other.getClass()) {
+      return getCombiningFactory();
+    } else {
+      throw new AggregatorFactoryNotMergeableException(this, other);
+    }
+  }
+
+  @Override
+  public List<AggregatorFactory> getRequiredColumns()
+  {
+    return Arrays.<AggregatorFactory>asList(new LongSumAggregatorFactory(fieldName, fieldName));
   }
 
   @Override
@@ -119,7 +136,7 @@ public class LongSumAggregatorFactory implements AggregatorFactory
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = fieldName.getBytes();
+    byte[] fieldNameBytes = StringUtils.toUtf8(fieldName);
 
     return ByteBuffer.allocate(1 + fieldNameBytes.length).put(CACHE_TYPE_ID).put(fieldNameBytes).array();
   }
@@ -127,7 +144,7 @@ public class LongSumAggregatorFactory implements AggregatorFactory
   @Override
   public String getTypeName()
   {
-    return "float";
+    return "long";
   }
 
   @Override
@@ -154,13 +171,21 @@ public class LongSumAggregatorFactory implements AggregatorFactory
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
 
     LongSumAggregatorFactory that = (LongSumAggregatorFactory) o;
 
-    if (fieldName != null ? !fieldName.equals(that.fieldName) : that.fieldName != null) return false;
-    if (name != null ? !name.equals(that.name) : that.name != null) return false;
+    if (fieldName != null ? !fieldName.equals(that.fieldName) : that.fieldName != null) {
+      return false;
+    }
+    if (name != null ? !name.equals(that.name) : that.name != null) {
+      return false;
+    }
 
     return true;
   }

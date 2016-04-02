@@ -1,25 +1,26 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.collections;
 
 import com.google.common.base.Function;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Ordering;
 import com.metamx.common.guava.BaseSequence;
@@ -28,9 +29,7 @@ import com.metamx.common.guava.Sequence;
 import com.metamx.common.guava.SequenceTestHelper;
 import com.metamx.common.guava.Sequences;
 import com.metamx.common.guava.TestSequence;
-import com.metamx.common.guava.Yielder;
-import com.metamx.common.guava.YieldingAccumulator;
-import junit.framework.Assert;
+import org.junit.Assert;
 import org.junit.Test;
 
 import javax.annotation.Nullable;
@@ -55,6 +54,61 @@ public class OrderedMergeSequenceTest
     OrderedMergeSequence<Integer> seq = makeMergedSequence(Ordering.<Integer>natural(), testSequences);
 
     SequenceTestHelper.testAll(seq, Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 8, 9));
+
+    for (TestSequence<Integer> sequence : testSequences) {
+      Assert.assertTrue(sequence.isClosed());
+    }
+  }
+
+  @Test
+  public void testMergeEmptySequence() throws Exception
+  {
+    final ArrayList<TestSequence<Integer>> testSequences = Lists.newArrayList(
+        TestSequence.create(ImmutableList.<Integer>of()),
+        TestSequence.create(2, 8),
+        TestSequence.create(4, 6, 8)
+    );
+
+    OrderedMergeSequence<Integer> seq = makeMergedSequence(Ordering.<Integer>natural(), testSequences);
+
+    SequenceTestHelper.testAll(seq, Arrays.asList(2, 4, 6, 8, 8));
+
+    for (TestSequence<Integer> sequence : testSequences) {
+      Assert.assertTrue(sequence.isClosed());
+    }
+  }
+
+  @Test
+  public void testMergeEmptySequenceAtEnd() throws Exception
+  {
+    final ArrayList<TestSequence<Integer>> testSequences = Lists.newArrayList(
+        TestSequence.create(2, 8),
+        TestSequence.create(4, 6, 8),
+        TestSequence.create(ImmutableList.<Integer>of())
+    );
+
+    OrderedMergeSequence<Integer> seq = makeMergedSequence(Ordering.<Integer>natural(), testSequences);
+
+    SequenceTestHelper.testAll(seq, Arrays.asList(2, 4, 6, 8, 8));
+
+    for (TestSequence<Integer> sequence : testSequences) {
+      Assert.assertTrue(sequence.isClosed());
+    }
+  }
+
+
+  @Test
+  public void testMergeEmptySequenceMiddle() throws Exception
+  {
+    final ArrayList<TestSequence<Integer>> testSequences = Lists.newArrayList(
+        TestSequence.create(2, 8),
+        TestSequence.create(ImmutableList.<Integer>of()),
+        TestSequence.create(4, 6, 8)
+    );
+
+    OrderedMergeSequence<Integer> seq = makeMergedSequence(Ordering.<Integer>natural(), testSequences);
+
+    SequenceTestHelper.testAll(seq, Arrays.asList(2, 4, 6, 8, 8));
 
     for (TestSequence<Integer> sequence : testSequences) {
       Assert.assertTrue(sequence.isClosed());

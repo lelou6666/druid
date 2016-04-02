@@ -1,20 +1,20 @@
 /*
- * Druid - a distributed column store.
- * Copyright (C) 2012, 2013  Metamarkets Group Inc.
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.filter;
@@ -22,9 +22,14 @@ package io.druid.query.filter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
-import io.druid.query.extraction.DimExtractionFn;
+import com.metamx.common.StringUtils;
+import io.druid.query.extraction.ExtractionFn;
+import io.druid.query.lookup.LookupExtractionFn;
+import io.druid.query.lookup.LookupExtractor;
+import io.druid.segment.filter.ExtractionFilter;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
 /**
  */
@@ -32,22 +37,26 @@ public class ExtractionDimFilter implements DimFilter
 {
   private final String dimension;
   private final String value;
-  private final DimExtractionFn dimExtractionFn;
+  private final ExtractionFn extractionFn;
 
   @JsonCreator
   public ExtractionDimFilter(
       @JsonProperty("dimension") String dimension,
       @JsonProperty("value") String value,
-      @JsonProperty("dimExtractionFn") DimExtractionFn dimExtractionFn
+      @JsonProperty("extractionFn") ExtractionFn extractionFn,
+      // for backwards compatibility
+      @Deprecated @JsonProperty("dimExtractionFn") ExtractionFn dimExtractionFn
   )
   {
     Preconditions.checkArgument(dimension != null, "dimension must not be null");
-    Preconditions.checkArgument(value != null, "value must not be null");
-    Preconditions.checkArgument(dimExtractionFn != null, "extraction function must not be null");
+    Preconditions.checkArgument(
+        extractionFn != null || dimExtractionFn != null,
+        "extraction function must not be null"
+    );
 
     this.dimension = dimension;
     this.value = value;
-    this.dimExtractionFn = dimExtractionFn;
+    this.extractionFn = extractionFn != null ? extractionFn : dimExtractionFn;
   }
 
   @JsonProperty
@@ -63,27 +72,51 @@ public class ExtractionDimFilter implements DimFilter
   }
 
   @JsonProperty
-  public DimExtractionFn getDimExtractionFn()
+  public ExtractionFn getExtractionFn()
   {
-    return dimExtractionFn;
+    return extractionFn;
   }
 
   @Override
   public byte[] getCacheKey()
   {
-    byte[] dimensionBytes = dimension.getBytes();
-    byte[] valueBytes = value.getBytes();
-
-    return ByteBuffer.allocate(1 + dimensionBytes.length + valueBytes.length)
+    byte[] dimensionBytes = StringUtils.toUtf8(dimension);
+    byte[] valueBytes = value == null ? new byte[0] : StringUtils.toUtf8(value);
+    byte[] extractionFnBytes = extractionFn.getCacheKey();
+    return ByteBuffer.allocate(3 + dimensionBytes.length + valueBytes.length + extractionFnBytes.length)
                      .put(DimFilterCacheHelper.EXTRACTION_CACHE_ID)
                      .put(dimensionBytes)
+                     .put(DimFilterCacheHelper.STRING_SEPARATOR)
                      .put(valueBytes)
+                     .put(DimFilterCacheHelper.STRING_SEPARATOR)
+                     .put(extractionFnBytes)
                      .array();
+  }
+
+  @Override
+  public DimFilter optimize()
+  {
+    if (this.getExtractionFn() instanceof LookupExtractionFn
+        && ((LookupExtractionFn) this.getExtractionFn()).isOptimize()) {
+      LookupExtractor lookup = ((LookupExtractionFn) this.getExtractionFn()).getLookup();
+      final List<String> keys = lookup.unapply(this.getValue());
+      final String dimensionName = this.getDimension();
+      if (!keys.isEmpty()) {
+        return new InDimFilter(dimensionName, keys);
+      }
+    }
+    return this;
+  }
+
+  @Override
+  public Filter toFilter()
+  {
+    return new ExtractionFilter(dimension, value, extractionFn);
   }
 
   @Override
   public String toString()
   {
-    return String.format("%s(%s) = %s", dimExtractionFn, dimension, value);
+    return String.format("%s(%s) = %s", extractionFn, dimension, value);
   }
 }
